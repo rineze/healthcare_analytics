@@ -1,102 +1,114 @@
 """
-Radiology wRVU Analysis Dashboard
-Analyzes Medicare Physician Fee Schedule changes for radiology codes (70000-79999)
+MPFS Analytics Dashboard
+Medicare Physician Fee Schedule Analysis Tool
 """
 import streamlit as st
+import pandas as pd
+from utils import (
+    get_connection,
+    get_available_years,
+    get_conversion_factors,
+    get_summary_stats,
+    COLORS,
+    format_currency
+)
 
 st.set_page_config(
-    page_title="Radiology wRVU Analysis",
-    page_icon=":chart_with_upwards_trend:",
+    page_title="MPFS Analytics",
+    page_icon="$",
     layout="wide",
     initial_sidebar_state="expanded"
 )
 
-# Shared color palette (Stephen Few - muted, semantic)
-COLORS = {
-    "positive": "#2e7d32",      # Muted green - increase/good
-    "negative": "#c62828",      # Muted red - decrease/bad
-    "neutral": "#616161",       # Gray - neutral/context
-    "neutral_light": "#9e9e9e", # Light gray
-    "background": "#fafafa",    # Off-white
-    "accent": "#1565c0",        # Muted blue - highlight/selection
-}
-
-# Radiology category definitions (CPT 70000-79999)
-RADIOLOGY_CATEGORIES = [
-    {"category": "Head & Neck Imaging", "code_start": 70010, "code_end": 70559},
-    {"category": "Chest Imaging", "code_start": 71010, "code_end": 71555},
-    {"category": "Spine Imaging", "code_start": 72010, "code_end": 72295},
-    {"category": "Upper Extremity Imaging", "code_start": 73000, "code_end": 73225},
-    {"category": "Lower Extremity Imaging", "code_start": 73500, "code_end": 73725},
-    {"category": "Abdomen & Pelvis Imaging", "code_start": 74000, "code_end": 74485},
-    {"category": "GI/GU Studies", "code_start": 74710, "code_end": 74775},
-    {"category": "Vascular Imaging", "code_start": 75600, "code_end": 75989},
-    {"category": "Diagnostic Ultrasound", "code_start": 76000, "code_end": 76999},
-    {"category": "Radiologic Guidance", "code_start": 77001, "code_end": 77022},
-    {"category": "Mammography", "code_start": 77046, "code_end": 77067},
-    {"category": "Bone Density/DXA", "code_start": 77071, "code_end": 77092},
-    {"category": "Radiation Oncology", "code_start": 77261, "code_end": 77799},
-    {"category": "Nuclear Medicine", "code_start": 78000, "code_end": 79999},
-]
-
 # Main page content
-st.title("Radiology wRVU Analysis")
-st.caption("Medicare Physician Fee Schedule | CPT 70000-79999 | 2018-2026")
+st.title("MPFS Analytics Dashboard")
+st.caption("Medicare Physician Fee Schedule | 2018-2026")
 
 st.markdown("""
-This dashboard analyzes Work RVU trends for radiology services across the Medicare Physician Fee Schedule.
+This dashboard provides insights into Medicare Physician Fee Schedule (MPFS) reimbursement trends,
+geographic variation, and change drivers.
 
-**Navigate using the sidebar:**
-- **YoY Changes**: Compare any two years, identify biggest movers
-- **Code Deep Dive**: Full historical analysis of specific CPT codes
-- **Category Overview**: Portfolio view of all radiology segments
+**Navigate using the sidebar to explore:**
+
+| Page | Purpose |
+|------|---------|
+| **Baseline Monitor** | Current CF, top movers, overall payment distribution |
+| **Code Trend Explorer** | Deep-dive into specific codes across localities |
+| **GPCI Locality Explorer** | Geographic payment adjustments by locality |
+| **Locality Spread** | Payment variation analysis across geographies |
+| **Change Decomposition** | Waterfall analysis: CF vs GPCI vs RVU effects |
 
 ---
-
-**Data Source**: CMS Physician Fee Schedule Relative Value Files
-**Scope**: 9 years (2018-2026) | ~160,000 records | CPT 70000-79999
 """)
 
-# Quick stats
-import psycopg2
-import pandas as pd
+# Load summary data
+try:
+    years = get_available_years()
+    latest_year = max(years)
+    cf_data = get_conversion_factors()
 
-@st.cache_resource
-def get_connection():
-    return psycopg2.connect(
-        host="127.0.0.1",
-        database="postgres",
-        user="postgres",
-        password="lolsk8s"
+    # KPI Cards
+    col1, col2, col3, col4 = st.columns(4)
+
+    current_cf = cf_data[cf_data['year'] == latest_year]['conversion_factor'].values[0]
+    prior_cf = cf_data[cf_data['year'] == latest_year - 1]['conversion_factor'].values[0]
+    cf_change = ((current_cf - prior_cf) / prior_cf) * 100
+
+    stats = get_summary_stats(latest_year, payable_only=True)
+
+    with col1:
+        st.metric(
+            f"{latest_year} Conversion Factor",
+            format_currency(current_cf, 4),
+            f"{cf_change:+.2f}%"
+        )
+
+    with col2:
+        st.metric("Years Covered", f"{min(years)} - {max(years)}")
+
+    with col3:
+        st.metric("Payable Codes", f"{stats['total_codes']:,}")
+
+    with col4:
+        st.metric("Localities", "~110")
+
+    st.divider()
+
+    # CF Trend Chart
+    st.subheader("Conversion Factor Trend")
+
+    import altair as alt
+
+    cf_chart = alt.Chart(cf_data).mark_line(point=True, color=COLORS['accent']).encode(
+        x=alt.X('year:O', title='Year'),
+        y=alt.Y('conversion_factor:Q', title='Conversion Factor ($)',
+                scale=alt.Scale(domain=[30, 40])),
+        tooltip=[
+            alt.Tooltip('year:O', title='Year'),
+            alt.Tooltip('conversion_factor:Q', title='CF', format='$.4f')
+        ]
+    ).properties(
+        height=300
     )
 
-@st.cache_data
-def get_summary_stats():
-    conn = get_connection()
-    query = """
-        SELECT
-            COUNT(*) as total_records,
-            COUNT(DISTINCT hcpcs) as unique_codes,
-            COUNT(DISTINCT mpfs_year) as years,
-            MIN(mpfs_year) as min_year,
-            MAX(mpfs_year) as max_year
-        FROM drinf.mpfs_rvu
-        WHERE hcpcs ~ '^7[0-9]'
-    """
-    return pd.read_sql(query, conn).iloc[0]
+    st.altair_chart(cf_chart, use_container_width=True)
 
-try:
-    stats = get_summary_stats()
+    st.markdown("""
+    ---
+    **Data Source:** CMS Physician Fee Schedule Relative Value Files
+    **Coverage:** 9 years (2018-2026) | ~160,000 code records | ~110 localities
+    """)
 
-    col1, col2, col3, col4 = st.columns(4)
-    with col1:
-        st.metric("Total Records", f"{stats['total_records']:,}")
-    with col2:
-        st.metric("Unique CPT Codes", f"{stats['unique_codes']:,}")
-    with col3:
-        st.metric("Years Covered", f"{stats['min_year']}-{stats['max_year']}")
-    with col4:
-        st.metric("Data Refresh", "Jan 2026")
 except Exception as e:
     st.error(f"Database connection error: {e}")
-    st.info("Ensure PostgreSQL is running and the drinf.mpfs_rvu table exists.")
+    st.info("Ensure PostgreSQL is running and the analytics views exist in the drinf schema.")
+    st.code("""
+    -- Required views:
+    -- drinf.v_cf_clean
+    -- drinf.v_rvu_clean
+    -- drinf.v_gpci_clean
+    -- drinf.v_mpfs_allowed
+    -- drinf.v_mpfs_allowed_yoy
+    -- drinf.v_gpci_yoy
+    -- drinf.v_mpfs_decomp
+    """)

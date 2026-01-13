@@ -1,5 +1,5 @@
 """
-Shared utilities for Radiology wRVU Dashboard
+Shared utilities for MPFS Analytics Dashboard
 """
 import streamlit as st
 import pandas as pd
@@ -23,23 +23,8 @@ COLORS = {
     "accent": "#1565c0",        # Muted blue - highlight/selection
 }
 
-# Radiology category definitions (CPT 70000-79999)
-RADIOLOGY_CATEGORIES = [
-    {"category": "Head & Neck Imaging", "code_start": 70010, "code_end": 70559},
-    {"category": "Chest Imaging", "code_start": 71010, "code_end": 71555},
-    {"category": "Spine Imaging", "code_start": 72010, "code_end": 72295},
-    {"category": "Upper Extremity Imaging", "code_start": 73000, "code_end": 73225},
-    {"category": "Lower Extremity Imaging", "code_start": 73500, "code_end": 73725},
-    {"category": "Abdomen & Pelvis Imaging", "code_start": 74000, "code_end": 74485},
-    {"category": "GI/GU Studies", "code_start": 74710, "code_end": 74775},
-    {"category": "Vascular Imaging", "code_start": 75600, "code_end": 75989},
-    {"category": "Diagnostic Ultrasound", "code_start": 76000, "code_end": 76999},
-    {"category": "Radiologic Guidance", "code_start": 77001, "code_end": 77022},
-    {"category": "Mammography", "code_start": 77046, "code_end": 77067},
-    {"category": "Bone Density/DXA", "code_start": 77071, "code_end": 77092},
-    {"category": "Radiation Oncology", "code_start": 77261, "code_end": 77799},
-    {"category": "Nuclear Medicine", "code_start": 78000, "code_end": 79999},
-]
+# Status codes that indicate non-payable codes
+NON_PAYABLE_STATUS = ['B', 'I', 'N', 'X', 'E', 'P']
 
 
 @st.cache_resource
@@ -48,128 +33,482 @@ def get_connection():
     return psycopg2.connect(**DB_CONFIG)
 
 
-def assign_category(code_num):
-    """Assign radiology category based on CPT code number."""
-    for cat in RADIOLOGY_CATEGORIES:
-        if cat["code_start"] <= code_num <= cat["code_end"]:
-            return cat["category"]
-    return "Other Radiology"
-
-
-@st.cache_data(ttl=3600)
-def load_radiology_data(exclude_rad_onc=True):
-    """Load all radiology data with category assignments.
-
-    Args:
-        exclude_rad_onc: If True, excludes Radiation Oncology codes (77261-77799)
-    """
-    conn = get_connection()
-
-    query = """
-        SELECT
-            mpfs_year,
-            hcpcs,
-            modifier,
-            description,
-            status_code,
-            work_rvu,
-            non_fac_pe_rvu,
-            facility_pe_rvu,
-            mp_rvu,
-            non_facility_total,
-            facility_total,
-            conversion_factor
-        FROM drinf.mpfs_rvu
-        WHERE hcpcs ~ '^7[0-9]'
-        ORDER BY mpfs_year, hcpcs
-    """
-    df = pd.read_sql(query, conn)
-
-    # Convert HCPCS to numeric for category assignment
-    df["code_num"] = pd.to_numeric(df["hcpcs"], errors="coerce")
-
-    # Assign categories
-    df["category"] = df["code_num"].apply(assign_category)
-
-    # Optionally exclude Radiation Oncology
-    if exclude_rad_onc:
-        df = df[df["category"] != "Radiation Oncology"]
-
-    # Calculate payment amounts
-    df["work_payment"] = df["work_rvu"] * df["conversion_factor"]
-    df["total_payment_nonfac"] = df["non_facility_total"] * df["conversion_factor"]
-    df["total_payment_fac"] = df["facility_total"] * df["conversion_factor"]
-
-    return df
-
+# ============================================================================
+# Core Data Functions (using analytics views)
+# ============================================================================
 
 @st.cache_data(ttl=3600)
 def get_available_years():
     """Get list of available years in the data."""
     conn = get_connection()
-    query = "SELECT DISTINCT mpfs_year FROM drinf.mpfs_rvu ORDER BY mpfs_year"
+    query = "SELECT DISTINCT year FROM drinf.v_cf_clean ORDER BY year"
     df = pd.read_sql(query, conn)
-    return df["mpfs_year"].tolist()
+    return df["year"].tolist()
 
 
-def calculate_yoy_changes(df, year_from, year_to, metric="work_rvu"):
-    """Calculate year-over-year changes for a given metric.
-
-    Returns DataFrame with columns: hcpcs, description, category,
-    value_from, value_to, change, pct_change
+@st.cache_data(ttl=3600)
+def get_conversion_factors():
+    """Get conversion factors by year."""
+    conn = get_connection()
+    query = """
+        SELECT year, conversion_factor
+        FROM drinf.v_cf_clean
+        ORDER BY year
     """
-    # Get data for both years
-    df_from = df[df["mpfs_year"] == year_from][["hcpcs", "description", "category", metric]].copy()
-    df_from = df_from.rename(columns={metric: "value_from"})
-
-    df_to = df[df["mpfs_year"] == year_to][["hcpcs", "description", "category", metric]].copy()
-    df_to = df_to.rename(columns={metric: "value_to"})
-
-    # Merge
-    merged = df_from.merge(df_to[["hcpcs", "value_to"]], on="hcpcs", how="inner")
-
-    # Calculate changes
-    merged["change"] = merged["value_to"] - merged["value_from"]
-    merged["pct_change"] = (merged["change"] / merged["value_from"].replace(0, pd.NA)) * 100
-
-    # Drop rows where we can't calculate change
-    merged = merged.dropna(subset=["change"])
-
-    return merged
+    return pd.read_sql(query, conn)
 
 
-def format_change(value, is_percent=False):
-    """Format a change value with color indication."""
+@st.cache_data(ttl=3600)
+def get_localities():
+    """Get list of all localities with their names."""
+    conn = get_connection()
+    query = """
+        SELECT DISTINCT locality_id, locality_name, state
+        FROM drinf.v_gpci_clean
+        WHERE year = (SELECT MAX(year) FROM drinf.v_gpci_clean)
+        ORDER BY state, locality_name
+    """
+    return pd.read_sql(query, conn)
+
+
+@st.cache_data(ttl=3600)
+def get_code_list(year=None, payable_only=True):
+    """Get list of codes with descriptions for dropdown."""
+    conn = get_connection()
+
+    year_filter = f"WHERE year = {year}" if year else ""
+    if payable_only:
+        status_filter = f"status_code NOT IN ({','.join(repr(s) for s in NON_PAYABLE_STATUS)})"
+        if year_filter:
+            year_filter += f" AND {status_filter}"
+        else:
+            year_filter = f"WHERE {status_filter}"
+
+    query = f"""
+        SELECT DISTINCT hcpcs_mod, hcpcs, modifier, description
+        FROM drinf.v_rvu_clean
+        {year_filter}
+        ORDER BY hcpcs_mod
+    """
+    return pd.read_sql(query, conn)
+
+
+# ============================================================================
+# Page 1: Baseline Monitor
+# ============================================================================
+
+@st.cache_data(ttl=3600)
+def get_summary_stats(year, payable_only=True):
+    """Get summary statistics for a given year."""
+    conn = get_connection()
+
+    status_filter = ""
+    if payable_only:
+        status_filter = f"AND status_code NOT IN ({','.join(repr(s) for s in NON_PAYABLE_STATUS)})"
+
+    query = f"""
+        SELECT
+            COUNT(DISTINCT hcpcs_mod) as total_codes,
+            COUNT(DISTINCT hcpcs) as unique_hcpcs
+        FROM drinf.v_rvu_clean
+        WHERE year = {year} {status_filter}
+    """
+    return pd.read_sql(query, conn).iloc[0]
+
+
+@st.cache_data(ttl=3600)
+def get_top_movers(year, locality_id, n=15, direction='increase', setting='nonfacility', payable_only=True):
+    """Get top payment increases or decreases.
+
+    Args:
+        year: The year to analyze
+        locality_id: The locality for comparison
+        n: Number of results to return
+        direction: 'increase' or 'decrease'
+        setting: 'nonfacility' or 'facility'
+        payable_only: Filter to payable codes only
+    """
+    conn = get_connection()
+
+    status_filter = ""
+    if payable_only:
+        status_filter = f"AND r.status_code NOT IN ({','.join(repr(s) for s in NON_PAYABLE_STATUS)})"
+
+    allowed_col = f"allowed_{setting}"
+    allowed_py_col = f"allowed_{setting}_py"
+    change_col = f"allowed_{setting}_change"
+    pct_change_col = f"allowed_{setting}_pct_change"
+
+    sort_order = "DESC" if direction == 'increase' else "ASC"
+
+    query = f"""
+        SELECT
+            y.hcpcs,
+            y.modifier,
+            r.description,
+            y.{allowed_py_col} as prior_year,
+            y.{allowed_col} as current_year,
+            y.{change_col} as change,
+            y.{pct_change_col} as pct_change,
+            y.w_rvu,
+            y.pe_rvu_{setting},
+            y.mp_rvu
+        FROM drinf.v_mpfs_allowed_yoy y
+        JOIN drinf.v_rvu_clean r ON r.year = y.year AND r.hcpcs_mod = y.hcpcs_mod
+        WHERE y.year = {year}
+          AND y.locality_id = '{locality_id}'
+          AND y.{change_col} IS NOT NULL
+          {status_filter}
+        ORDER BY y.{change_col} {sort_order}
+        LIMIT {n}
+    """
+    return pd.read_sql(query, conn)
+
+
+@st.cache_data(ttl=3600)
+def get_payment_change_distribution(year, locality_id, setting='nonfacility', payable_only=True):
+    """Get distribution of payment changes for histogram."""
+    conn = get_connection()
+
+    status_filter = ""
+    if payable_only:
+        status_filter = f"AND r.status_code NOT IN ({','.join(repr(s) for s in NON_PAYABLE_STATUS)})"
+
+    pct_change_col = f"allowed_{setting}_pct_change"
+
+    query = f"""
+        SELECT y.{pct_change_col} as pct_change
+        FROM drinf.v_mpfs_allowed_yoy y
+        JOIN drinf.v_rvu_clean r ON r.year = y.year AND r.hcpcs_mod = y.hcpcs_mod
+        WHERE y.year = {year}
+          AND y.locality_id = '{locality_id}'
+          AND y.{pct_change_col} IS NOT NULL
+          AND y.{pct_change_col} BETWEEN -50 AND 50
+          {status_filter}
+    """
+    return pd.read_sql(query, conn)
+
+
+@st.cache_data(ttl=3600)
+def get_codes_with_cuts(year, locality_id, setting='nonfacility', payable_only=True):
+    """Get count of codes with payment decreases."""
+    conn = get_connection()
+
+    status_filter = ""
+    if payable_only:
+        status_filter = f"AND r.status_code NOT IN ({','.join(repr(s) for s in NON_PAYABLE_STATUS)})"
+
+    change_col = f"allowed_{setting}_change"
+
+    query = f"""
+        SELECT COUNT(DISTINCT y.hcpcs_mod) as cut_count
+        FROM drinf.v_mpfs_allowed_yoy y
+        JOIN drinf.v_rvu_clean r ON r.year = y.year AND r.hcpcs_mod = y.hcpcs_mod
+        WHERE y.year = {year}
+          AND y.locality_id = '{locality_id}'
+          AND y.{change_col} < 0
+          {status_filter}
+    """
+    return pd.read_sql(query, conn).iloc[0]['cut_count']
+
+
+# ============================================================================
+# Page 2: Code Trend Explorer
+# ============================================================================
+
+@st.cache_data(ttl=3600)
+def get_code_trend(hcpcs_mod, locality_ids, setting='nonfacility'):
+    """Get allowed amount trend for a code across localities."""
+    conn = get_connection()
+
+    locality_filter = ",".join(f"'{loc}'" for loc in locality_ids)
+    allowed_col = f"allowed_{setting}"
+
+    query = f"""
+        SELECT
+            y.year,
+            y.locality_id,
+            g.locality_name,
+            y.{allowed_col} as allowed,
+            y.w_rvu,
+            y.conversion_factor
+        FROM drinf.v_mpfs_allowed_yoy y
+        JOIN drinf.v_gpci_clean g ON g.year = y.year AND g.locality_id = y.locality_id
+        WHERE y.hcpcs_mod = '{hcpcs_mod}'
+          AND y.locality_id IN ({locality_filter})
+        ORDER BY y.year, y.locality_id
+    """
+    return pd.read_sql(query, conn)
+
+
+@st.cache_data(ttl=3600)
+def get_code_yoy_detail(hcpcs_mod, locality_ids, setting='nonfacility'):
+    """Get YoY detail table for a code across localities."""
+    conn = get_connection()
+
+    locality_filter = ",".join(f"'{loc}'" for loc in locality_ids)
+    allowed_col = f"allowed_{setting}"
+    allowed_py_col = f"allowed_{setting}_py"
+    change_col = f"allowed_{setting}_change"
+    pct_change_col = f"allowed_{setting}_pct_change"
+
+    query = f"""
+        SELECT
+            y.year,
+            y.locality_id,
+            g.locality_name,
+            y.{allowed_col} as current_allowed,
+            y.{allowed_py_col} as prior_allowed,
+            y.{change_col} as change,
+            y.{pct_change_col} as pct_change,
+            y.w_rvu,
+            y.conversion_factor
+        FROM drinf.v_mpfs_allowed_yoy y
+        JOIN drinf.v_gpci_clean g ON g.year = y.year AND g.locality_id = y.locality_id
+        WHERE y.hcpcs_mod = '{hcpcs_mod}'
+          AND y.locality_id IN ({locality_filter})
+        ORDER BY y.year DESC, g.locality_name
+    """
+    return pd.read_sql(query, conn)
+
+
+@st.cache_data(ttl=3600)
+def get_locality_comparison(hcpcs_mod, year, setting='nonfacility', top_n=20):
+    """Get payment by locality for bar chart comparison."""
+    conn = get_connection()
+
+    allowed_col = f"allowed_{setting}"
+
+    query = f"""
+        SELECT
+            a.locality_id,
+            g.locality_name,
+            a.{allowed_col} as allowed,
+            a.gpci_work,
+            a.gpci_pe,
+            a.gpci_mp
+        FROM drinf.v_mpfs_allowed a
+        JOIN drinf.v_gpci_clean g ON g.year = a.year AND g.locality_id = a.locality_id
+        WHERE a.hcpcs_mod = '{hcpcs_mod}'
+          AND a.year = {year}
+        ORDER BY a.{allowed_col} DESC
+        LIMIT {top_n}
+    """
+    return pd.read_sql(query, conn)
+
+
+# ============================================================================
+# Page 3: GPCI Locality Explorer
+# ============================================================================
+
+@st.cache_data(ttl=3600)
+def get_gpci_rankings(year):
+    """Get GPCI rankings by locality."""
+    conn = get_connection()
+
+    query = f"""
+        SELECT
+            locality_id,
+            locality_name,
+            state,
+            gpci_work,
+            gpci_pe,
+            gpci_mp,
+            (gpci_work + gpci_pe + gpci_mp) / 3.0 as gpci_composite,
+            gpci_work_change,
+            gpci_pe_change,
+            gpci_mp_change
+        FROM drinf.v_gpci_yoy
+        WHERE year = {year}
+        ORDER BY (gpci_work + gpci_pe + gpci_mp) / 3.0 DESC
+    """
+    return pd.read_sql(query, conn)
+
+
+@st.cache_data(ttl=3600)
+def get_gpci_yoy_changes(year, component='work', n=15):
+    """Get largest GPCI YoY changes."""
+    conn = get_connection()
+
+    gpci_col = f"gpci_{component}"
+    gpci_py_col = f"gpci_{component}_py"
+    change_col = f"gpci_{component}_change"
+    pct_change_col = f"gpci_{component}_pct_change"
+
+    query = f"""
+        SELECT
+            locality_id,
+            locality_name,
+            state,
+            {gpci_py_col} as prior_value,
+            {gpci_col} as current_value,
+            {change_col} as change,
+            {pct_change_col} as pct_change
+        FROM drinf.v_gpci_yoy
+        WHERE year = {year}
+          AND {gpci_py_col} IS NOT NULL
+        ORDER BY ABS({change_col}) DESC
+        LIMIT {n}
+    """
+    return pd.read_sql(query, conn)
+
+
+@st.cache_data(ttl=3600)
+def get_gpci_trend(locality_id):
+    """Get GPCI component trends for a locality."""
+    conn = get_connection()
+
+    query = f"""
+        SELECT
+            year,
+            gpci_work,
+            gpci_pe,
+            gpci_mp
+        FROM drinf.v_gpci_yoy
+        WHERE locality_id = '{locality_id}'
+        ORDER BY year
+    """
+    return pd.read_sql(query, conn)
+
+
+# ============================================================================
+# Page 4: Locality Spread
+# ============================================================================
+
+@st.cache_data(ttl=3600)
+def get_locality_spread(hcpcs_mod, year, setting='nonfacility'):
+    """Get all localities for spread analysis."""
+    conn = get_connection()
+
+    allowed_col = f"allowed_{setting}"
+
+    query = f"""
+        SELECT
+            a.locality_id,
+            g.locality_name,
+            g.state,
+            a.{allowed_col} as allowed,
+            a.gpci_work,
+            a.gpci_pe,
+            a.gpci_mp
+        FROM drinf.v_mpfs_allowed a
+        JOIN drinf.v_gpci_clean g ON g.year = a.year AND g.locality_id = a.locality_id
+        WHERE a.hcpcs_mod = '{hcpcs_mod}'
+          AND a.year = {year}
+        ORDER BY a.{allowed_col} DESC
+    """
+    return pd.read_sql(query, conn)
+
+
+@st.cache_data(ttl=3600)
+def get_spread_stats(hcpcs_mod, year, setting='nonfacility'):
+    """Calculate spread statistics for a code."""
+    conn = get_connection()
+
+    allowed_col = f"allowed_{setting}"
+
+    query = f"""
+        SELECT
+            MAX({allowed_col}) as max_allowed,
+            MIN({allowed_col}) as min_allowed,
+            AVG({allowed_col}) as avg_allowed,
+            STDDEV({allowed_col}) as std_dev,
+            PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY {allowed_col}) as median
+        FROM drinf.v_mpfs_allowed
+        WHERE hcpcs_mod = '{hcpcs_mod}'
+          AND year = {year}
+    """
+    return pd.read_sql(query, conn).iloc[0]
+
+
+# ============================================================================
+# Page 5: Change Decomposition
+# ============================================================================
+
+@st.cache_data(ttl=3600)
+def get_decomposition(hcpcs_mod, locality_id, year, setting='nonfacility'):
+    """Get decomposition data for waterfall chart."""
+    conn = get_connection()
+
+    query = f"""
+        SELECT
+            year,
+            allowed_{setting}_py as prior_allowed,
+            allowed_{setting} as current_allowed,
+            total_change_{setting} as total_change,
+            cf_effect_{setting} as cf_effect,
+            gpci_effect_{setting} as gpci_effect,
+            rvu_effect_{setting} as rvu_effect,
+            w_rvu_py,
+            w_rvu,
+            gpci_work_py,
+            gpci_work,
+            cf_py,
+            conversion_factor
+        FROM drinf.v_mpfs_decomp
+        WHERE hcpcs_mod = '{hcpcs_mod}'
+          AND locality_id = '{locality_id}'
+          AND year = {year}
+    """
+    df = pd.read_sql(query, conn)
+    return df.iloc[0] if len(df) > 0 else None
+
+
+@st.cache_data(ttl=3600)
+def get_decomposition_history(hcpcs_mod, locality_id, setting='nonfacility'):
+    """Get full decomposition history for a code/locality."""
+    conn = get_connection()
+
+    query = f"""
+        SELECT
+            year,
+            allowed_{setting}_py as prior_allowed,
+            allowed_{setting} as current_allowed,
+            total_change_{setting} as total_change,
+            cf_effect_{setting} as cf_effect,
+            gpci_effect_{setting} as gpci_effect,
+            rvu_effect_{setting} as rvu_effect,
+            w_rvu_py,
+            w_rvu,
+            gpci_work_py,
+            gpci_work,
+            cf_py,
+            conversion_factor
+        FROM drinf.v_mpfs_decomp
+        WHERE hcpcs_mod = '{hcpcs_mod}'
+          AND locality_id = '{locality_id}'
+        ORDER BY year DESC
+    """
+    return pd.read_sql(query, conn)
+
+
+# ============================================================================
+# Formatting Utilities
+# ============================================================================
+
+def format_currency(value, decimals=2):
+    """Format a value as currency."""
     if pd.isna(value):
         return "-"
-    if is_percent:
-        return f"{value:+.1f}%"
-    return f"{value:+.2f}"
+    return f"${value:,.{decimals}f}"
 
 
-def get_sparkline_data(df, hcpcs_code, metric="work_rvu"):
-    """Get time series data for sparkline visualization."""
-    code_data = df[df["hcpcs"] == hcpcs_code].sort_values("mpfs_year")
-    return code_data[["mpfs_year", metric]].values.tolist()
+def format_percent(value, decimals=1):
+    """Format a value as percentage."""
+    if pd.isna(value):
+        return "-"
+    return f"{value:+.{decimals}f}%"
 
 
-def create_category_summary(df, year_from, year_to, metric="work_rvu"):
-    """Create summary statistics by category for YoY comparison."""
-    # Calculate averages by category and year
-    cat_from = df[df["mpfs_year"] == year_from].groupby("category")[metric].mean().reset_index()
-    cat_from = cat_from.rename(columns={metric: "avg_from"})
+def format_change(value, decimals=2):
+    """Format a change value with sign."""
+    if pd.isna(value):
+        return "-"
+    return f"{value:+,.{decimals}f}"
 
-    cat_to = df[df["mpfs_year"] == year_to].groupby("category")[metric].mean().reset_index()
-    cat_to = cat_to.rename(columns={metric: "avg_to"})
 
-    # Merge and calculate changes
-    cat_summary = cat_from.merge(cat_to, on="category", how="outer")
-    cat_summary["change"] = cat_summary["avg_to"] - cat_summary["avg_from"]
-    cat_summary["pct_change"] = (cat_summary["change"] / cat_summary["avg_from"].replace(0, pd.NA)) * 100
-
-    # Add code counts
-    code_counts = df[df["mpfs_year"] == year_to].groupby("category")["hcpcs"].nunique().reset_index()
-    code_counts = code_counts.rename(columns={"hcpcs": "code_count"})
-    cat_summary = cat_summary.merge(code_counts, on="category", how="left")
-
-    return cat_summary.sort_values("change", ascending=False)
+def get_change_color(value):
+    """Get color based on positive/negative change."""
+    if pd.isna(value) or value == 0:
+        return COLORS["neutral"]
+    return COLORS["positive"] if value > 0 else COLORS["negative"]
