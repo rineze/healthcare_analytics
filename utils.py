@@ -512,3 +512,191 @@ def get_change_color(value):
     if pd.isna(value) or value == 0:
         return COLORS["neutral"]
     return COLORS["positive"] if value > 0 else COLORS["negative"]
+
+
+# ============================================================================
+# Intelligence Brief Functions
+# ============================================================================
+
+def get_codes_analysis(hcpcs_codes, year, locality_id='AL-00', setting='nonfacility'):
+    """Get comprehensive analysis for a list of HCPCS codes.
+
+    Returns dict with summary stats, individual code details, and insights.
+    """
+    conn = get_connection()
+
+    codes_str = ",".join(f"'{c}'" for c in hcpcs_codes)
+    allowed_col = f"allowed_{setting}"
+    allowed_py_col = f"allowed_{setting}_py"
+    change_col = f"allowed_{setting}_change"
+    pct_change_col = f"allowed_{setting}_pct_change"
+
+    # Get YoY data for selected codes
+    query = f"""
+        SELECT
+            y.hcpcs,
+            y.modifier,
+            y.hcpcs_mod,
+            r.description,
+            y.{allowed_py_col} as prior_allowed,
+            y.{allowed_col} as current_allowed,
+            y.{change_col} as change,
+            y.{pct_change_col} as pct_change,
+            y.w_rvu,
+            y.conversion_factor
+        FROM drinf.v_mpfs_allowed_yoy y
+        JOIN drinf.v_rvu_clean r ON r.year = y.year AND r.hcpcs_mod = y.hcpcs_mod
+        WHERE y.year = {year}
+          AND y.locality_id = '{locality_id}'
+          AND y.hcpcs IN ({codes_str})
+        ORDER BY y.{change_col} DESC
+    """
+    codes_df = pd.read_sql(query, conn)
+
+    if len(codes_df) == 0:
+        return None
+
+    # Calculate summary stats
+    avg_change = codes_df['pct_change'].mean()
+    total_codes = len(codes_df)
+    codes_increased = (codes_df['change'] > 0).sum()
+    codes_decreased = (codes_df['change'] < 0).sum()
+
+    # Get geographic variation for these codes
+    geo_query = f"""
+        SELECT
+            a.hcpcs,
+            g.locality_name,
+            a.{allowed_col} as allowed
+        FROM drinf.v_mpfs_allowed a
+        JOIN drinf.v_gpci_clean g ON g.year = a.year AND g.locality_id = a.locality_id
+        WHERE a.year = {year}
+          AND a.hcpcs IN ({codes_str})
+          AND a.modifier IS NULL
+    """
+    geo_df = pd.read_sql(query, conn)
+
+    # Find highest paying locality for primary code
+    primary_code = hcpcs_codes[0]
+    geo_query_primary = f"""
+        SELECT
+            g.locality_name,
+            g.locality_id,
+            a.{allowed_col} as allowed
+        FROM drinf.v_mpfs_allowed a
+        JOIN drinf.v_gpci_clean g ON g.year = a.year AND g.locality_id = a.locality_id
+        WHERE a.year = {year}
+          AND a.hcpcs = '{primary_code}'
+          AND a.modifier IS NULL
+        ORDER BY a.{allowed_col} DESC
+        LIMIT 5
+    """
+    top_localities = pd.read_sql(geo_query_primary, conn)
+
+    # Get national average
+    avg_query = f"""
+        SELECT AVG({allowed_col}) as avg_allowed
+        FROM drinf.v_mpfs_allowed
+        WHERE year = {year}
+          AND hcpcs = '{primary_code}'
+          AND modifier IS NULL
+    """
+    national_avg = pd.read_sql(avg_query, conn).iloc[0]['avg_allowed']
+
+    return {
+        'codes_df': codes_df,
+        'summary': {
+            'avg_pct_change': avg_change,
+            'total_codes': total_codes,
+            'codes_increased': codes_increased,
+            'codes_decreased': codes_decreased,
+        },
+        'top_localities': top_localities,
+        'national_avg': national_avg
+    }
+
+
+def generate_brief_email(topic, analysis, year, chart_path=None, dashboard_url=None):
+    """Generate formatted email content for intelligence brief.
+
+    Returns markdown string ready for display or export.
+    """
+    if analysis is None:
+        return "No data available for the selected codes."
+
+    codes_df = analysis['codes_df']
+    summary = analysis['summary']
+    top_localities = analysis['top_localities']
+    national_avg = analysis['national_avg']
+
+    # Determine overall trend direction
+    if summary['avg_pct_change'] > 0.5:
+        trend_word = "increase"
+        trend_emoji = ""
+    elif summary['avg_pct_change'] < -0.5:
+        trend_word = "decrease"
+        trend_emoji = ""
+    else:
+        trend_word = "remain relatively flat"
+        trend_emoji = ""
+
+    # Build the email
+    email = f"""## MPFS Intelligence Brief: {topic}
+
+*Analysis of Medicare Physician Fee Schedule data for {year}*
+
+---
+
+### Key Finding
+
+{topic} codes saw payments **{trend_word} by {abs(summary['avg_pct_change']):.1f}%** on average in {year}, driven primarily by conversion factor changes.
+
+- **{summary['codes_increased']}** codes with payment increases
+- **{summary['codes_decreased']}** codes with payment decreases
+
+---
+
+### Code-Level Detail
+
+| CPT | Description | Prior Year | Current | Change |
+|-----|-------------|------------|---------|--------|
+"""
+
+    # Add top 5-10 codes to table
+    for _, row in codes_df.head(10).iterrows():
+        desc = row['description'][:35] + "..." if len(str(row['description'])) > 35 else row['description']
+        prior = format_currency(row['prior_allowed'])
+        current = format_currency(row['current_allowed'])
+        change = format_percent(row['pct_change'])
+        email += f"| {row['hcpcs']} | {desc} | {prior} | {current} | {change} |\n"
+
+    email += f"""
+---
+
+### Geographic Insight
+
+"""
+
+    if len(top_localities) > 0:
+        top_loc = top_localities.iloc[0]
+        pct_above = ((top_loc['allowed'] - national_avg) / national_avg * 100) if national_avg else 0
+        email += f"**{top_loc['locality_name']}** ({top_loc['locality_id']}) pays **{pct_above:.0f}% above** the national average for these codes.\n\n"
+        email += "**Top paying localities:**\n"
+        for _, loc in top_localities.iterrows():
+            email += f"- {loc['locality_name']}: {format_currency(loc['allowed'])}\n"
+
+    email += f"""
+---
+
+### Methodology
+
+- **Data Source:** CMS Physician Fee Schedule Relative Value Files
+- **Reference Locality:** Alabama (AL-00) used for national baseline
+- **Setting:** Non-Facility
+
+"""
+
+    if dashboard_url:
+        email += f"\n**[View detailed analysis in dashboard]({dashboard_url})**\n"
+
+    return email
