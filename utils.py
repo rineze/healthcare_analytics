@@ -616,7 +616,64 @@ def get_codes_analysis(hcpcs_codes, year, locality_id='AL-00', setting='nonfacil
     }
 
 
-def generate_brief_email(topic, analysis, year, chart_path=None, dashboard_url=None):
+def get_utilization_data(hcpcs_codes, year=None):
+    """Get utilization data for a list of HCPCS codes.
+
+    Returns DataFrame with services, beneficiaries, payments by code.
+    """
+    conn = get_connection()
+
+    codes_str = ",".join(f"'{c}'" for c in hcpcs_codes)
+    year_filter = f"AND year = {year}" if year else ""
+
+    query = f"""
+        SELECT
+            year,
+            hcpcs,
+            hcpcs_desc,
+            place_of_service,
+            total_services,
+            total_beneficiaries,
+            avg_payment_amt,
+            (total_services * avg_payment_amt) as total_medicare_payment
+        FROM drinf.medicare_utilization
+        WHERE hcpcs IN ({codes_str})
+          AND geo_level = 'National'
+          {year_filter}
+        ORDER BY year DESC, total_services DESC
+    """
+    return pd.read_sql(query, conn)
+
+
+def get_utilization_summary(hcpcs_codes, year):
+    """Get summary utilization stats for a list of codes.
+
+    Returns dict with total services, beneficiaries, payments.
+    """
+    conn = get_connection()
+
+    codes_str = ",".join(f"'{c}'" for c in hcpcs_codes)
+
+    query = f"""
+        SELECT
+            SUM(total_services) as total_services,
+            SUM(total_beneficiaries) as total_beneficiaries,
+            SUM(total_services * avg_payment_amt) as total_medicare_payment
+        FROM drinf.medicare_utilization
+        WHERE hcpcs IN ({codes_str})
+          AND geo_level = 'National'
+          AND year = {year}
+    """
+    result = pd.read_sql(query, conn).iloc[0]
+
+    return {
+        'total_services': int(result['total_services']) if pd.notna(result['total_services']) else 0,
+        'total_beneficiaries': int(result['total_beneficiaries']) if pd.notna(result['total_beneficiaries']) else 0,
+        'total_medicare_payment': float(result['total_medicare_payment']) if pd.notna(result['total_medicare_payment']) else 0,
+    }
+
+
+def generate_brief_email(topic, analysis, year, chart_path=None, dashboard_url=None, utilization=None):
     """Generate formatted email content for intelligence brief.
 
     Returns markdown string ready for display or export.
@@ -670,6 +727,30 @@ def generate_brief_email(topic, analysis, year, chart_path=None, dashboard_url=N
         change = format_percent(row['pct_change'])
         email += f"| {row['hcpcs']} | {desc} | {prior} | {current} | {change} |\n"
 
+    # Add utilization section if data available
+    if utilization and utilization.get('total_services', 0) > 0:
+        total_svc = utilization['total_services']
+        total_bene = utilization['total_beneficiaries']
+        total_pay = utilization['total_medicare_payment']
+
+        email += f"""
+---
+
+### Medicare Utilization Context
+
+These codes represent significant Medicare volume:
+
+- **{total_svc:,.0f}** total services per year
+- **{total_bene:,.0f}** unique beneficiaries
+- **${total_pay/1e6:,.1f}M** total Medicare payments
+
+"""
+        # Calculate budget impact if we have payment change data
+        if summary['avg_pct_change'] != 0:
+            impact = total_pay * (summary['avg_pct_change'] / 100)
+            impact_word = "increase" if impact > 0 else "decrease"
+            email += f"**Estimated budget impact:** ${abs(impact)/1e6:,.1f}M {impact_word} based on payment rate changes.\n"
+
     email += f"""
 ---
 
@@ -690,9 +771,10 @@ def generate_brief_email(topic, analysis, year, chart_path=None, dashboard_url=N
 
 ### Methodology
 
-- **Data Source:** CMS Physician Fee Schedule Relative Value Files
+- **Data Source:** CMS Physician Fee Schedule Relative Value Files + Medicare Utilization Data
 - **Reference Locality:** Alabama (AL-00) used for national baseline
 - **Setting:** Non-Facility
+- **Utilization Year:** 2023 (most recent available)
 
 """
 

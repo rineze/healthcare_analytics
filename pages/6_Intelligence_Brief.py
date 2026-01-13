@@ -11,6 +11,7 @@ from utils import (
     get_available_years,
     get_code_list,
     get_codes_analysis,
+    get_utilization_summary,
     generate_brief_email,
     COLORS,
     format_currency,
@@ -186,8 +187,15 @@ with col_analysis:
             try:
                 analysis = get_codes_analysis(selected_codes, selected_year)
 
+                # Get utilization data (use 2023 as most recent)
+                try:
+                    utilization = get_utilization_summary(selected_codes, 2023)
+                except:
+                    utilization = None
+
                 if analysis:
                     st.session_state['analysis'] = analysis
+                    st.session_state['utilization'] = utilization
                     st.session_state['topic'] = topic_name
                     st.session_state['year'] = selected_year
                     st.success("Analysis complete!")
@@ -215,6 +223,18 @@ with col_analysis:
             st.metric("Increased", summary['codes_increased'])
         with m4:
             st.metric("Decreased", summary['codes_decreased'])
+
+        # Utilization metrics (if available)
+        utilization = st.session_state.get('utilization')
+        if utilization and utilization.get('total_services', 0) > 0:
+            st.markdown("**Medicare Utilization (2023):**")
+            u1, u2, u3 = st.columns(3)
+            with u1:
+                st.metric("Total Services", f"{utilization['total_services']:,.0f}")
+            with u2:
+                st.metric("Beneficiaries", f"{utilization['total_beneficiaries']:,.0f}")
+            with u3:
+                st.metric("Total Medicare $", f"${utilization['total_medicare_payment']/1e6:,.1f}M")
 
         st.markdown("---")
 
@@ -257,7 +277,8 @@ with col_analysis:
         # Generate Email
         st.subheader("Email Brief")
 
-        email_content = generate_brief_email(topic, analysis, year)
+        utilization = st.session_state.get('utilization')
+        email_content = generate_brief_email(topic, analysis, year, utilization=utilization)
         st.session_state['email_content'] = email_content
 
         # Display in expandable container
