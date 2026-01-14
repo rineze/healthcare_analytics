@@ -815,3 +815,190 @@ These codes represent significant Medicare volume:
         email += f"\n**[View detailed analysis in dashboard]({dashboard_url})**\n"
 
     return email
+
+
+# ============================================================================
+# Page 7: CPT Economics & Site-of-Service Signals
+# ============================================================================
+
+@st.cache_data(ttl=3600)
+def get_cpt_economics_data(year, locality_id):
+    """Get CPT economics data with RVU shares and site-of-service gaps."""
+    conn = get_connection()
+
+    query = f"""
+        SELECT
+            a.hcpcs,
+            a.modifier,
+            a.hcpcs_mod,
+            a.description,
+            a.status_code,
+            a.w_rvu,
+            a.pe_rvu_facility,
+            a.pe_rvu_nonfacility,
+            a.mp_rvu,
+            a.allowed_facility,
+            a.allowed_nonfacility,
+            a.gpci_pe,
+            -- Calculate totals
+            COALESCE(a.w_rvu, 0) + COALESCE(a.pe_rvu_nonfacility, 0) + COALESCE(a.mp_rvu, 0) as total_rvu_nf,
+            COALESCE(a.w_rvu, 0) + COALESCE(a.pe_rvu_facility, 0) + COALESCE(a.mp_rvu, 0) as total_rvu_f,
+            -- Site gap
+            a.allowed_nonfacility - a.allowed_facility as site_gap,
+            CASE WHEN a.allowed_facility > 0
+                THEN (a.allowed_nonfacility - a.allowed_facility) / a.allowed_facility * 100
+                ELSE NULL END as site_gap_pct
+        FROM drinf.v_mpfs_allowed a
+        WHERE a.year = {year}
+          AND a.locality_id = '{locality_id}'
+          AND a.status_code NOT IN ('B', 'I', 'N', 'X', 'E', 'P')
+          AND a.allowed_nonfacility IS NOT NULL
+          AND a.allowed_facility IS NOT NULL
+          AND (COALESCE(a.w_rvu, 0) + COALESCE(a.pe_rvu_nonfacility, 0) + COALESCE(a.mp_rvu, 0)) > 0
+    """
+    df = pd.read_sql(query, conn)
+
+    # Calculate shares
+    df['work_share_nf'] = df['w_rvu'] / df['total_rvu_nf'] * 100
+    df['pe_share_nf'] = df['pe_rvu_nonfacility'] / df['total_rvu_nf'] * 100
+    df['mp_share_nf'] = df['mp_rvu'] / df['total_rvu_nf'] * 100
+
+    df['work_share_f'] = df['w_rvu'] / df['total_rvu_f'] * 100
+    df['pe_share_f'] = df['pe_rvu_facility'] / df['total_rvu_f'] * 100
+    df['mp_share_f'] = df['mp_rvu'] / df['total_rvu_f'] * 100
+
+    # Geo sensitivity category based on PE share (non-facility)
+    df['geo_sensitivity'] = pd.cut(
+        df['pe_share_nf'],
+        bins=[0, 40, 60, 100],
+        labels=['Low', 'Medium', 'High']
+    )
+
+    # Economics category
+    def categorize(row):
+        if row['work_share_nf'] > 50 and row['pe_share_nf'] < 40:
+            return 'Work-Heavy'
+        elif row['pe_share_nf'] > 50 and row['work_share_nf'] < 40:
+            return 'PE-Heavy'
+        else:
+            return 'Balanced'
+
+    df['econ_category'] = df.apply(categorize, axis=1)
+
+    return df
+
+
+@st.cache_data(ttl=3600)
+def get_cpt_economics_with_util(year, locality_id, util_year=2023):
+    """Get CPT economics joined with utilization data."""
+    conn = get_connection()
+
+    query = f"""
+        SELECT
+            a.hcpcs,
+            a.modifier,
+            a.hcpcs_mod,
+            a.description,
+            a.status_code,
+            a.w_rvu,
+            a.pe_rvu_facility,
+            a.pe_rvu_nonfacility,
+            a.mp_rvu,
+            a.allowed_facility,
+            a.allowed_nonfacility,
+            a.gpci_pe,
+            COALESCE(a.w_rvu, 0) + COALESCE(a.pe_rvu_nonfacility, 0) + COALESCE(a.mp_rvu, 0) as total_rvu_nf,
+            COALESCE(a.w_rvu, 0) + COALESCE(a.pe_rvu_facility, 0) + COALESCE(a.mp_rvu, 0) as total_rvu_f,
+            a.allowed_nonfacility - a.allowed_facility as site_gap,
+            CASE WHEN a.allowed_facility > 0
+                THEN (a.allowed_nonfacility - a.allowed_facility) / a.allowed_facility * 100
+                ELSE NULL END as site_gap_pct,
+            -- Utilization
+            COALESCE(u.total_services, 0) as total_services,
+            COALESCE(u.total_beneficiaries, 0) as total_beneficiaries,
+            COALESCE(u.avg_payment_amt, 0) as util_avg_payment,
+            COALESCE(u.total_services * u.avg_payment_amt, 0) as total_medicare_dollars
+        FROM drinf.v_mpfs_allowed a
+        LEFT JOIN (
+            SELECT hcpcs,
+                   SUM(total_services) as total_services,
+                   SUM(total_beneficiaries) as total_beneficiaries,
+                   AVG(avg_payment_amt) as avg_payment_amt
+            FROM drinf.medicare_utilization
+            WHERE year = {util_year} AND geo_level = 'National'
+            GROUP BY hcpcs
+        ) u ON a.hcpcs = u.hcpcs
+        WHERE a.year = {year}
+          AND a.locality_id = '{locality_id}'
+          AND a.status_code NOT IN ('B', 'I', 'N', 'X', 'E', 'P')
+          AND a.allowed_nonfacility IS NOT NULL
+          AND a.allowed_facility IS NOT NULL
+          AND (COALESCE(a.w_rvu, 0) + COALESCE(a.pe_rvu_nonfacility, 0) + COALESCE(a.mp_rvu, 0)) > 0
+    """
+    df = pd.read_sql(query, conn)
+
+    # Calculate shares
+    df['work_share_nf'] = df['w_rvu'] / df['total_rvu_nf'] * 100
+    df['pe_share_nf'] = df['pe_rvu_nonfacility'] / df['total_rvu_nf'] * 100
+    df['mp_share_nf'] = df['mp_rvu'] / df['total_rvu_nf'] * 100
+
+    df['work_share_f'] = df['w_rvu'] / df['total_rvu_f'] * 100
+    df['pe_share_f'] = df['pe_rvu_facility'] / df['total_rvu_f'] * 100
+    df['mp_share_f'] = df['mp_rvu'] / df['total_rvu_f'] * 100
+
+    # Util-weighted gap impact
+    df['util_gap_impact'] = df['total_services'] * df['site_gap']
+
+    # Geo sensitivity
+    df['geo_sensitivity'] = pd.cut(
+        df['pe_share_nf'],
+        bins=[0, 40, 60, 100],
+        labels=['Low', 'Medium', 'High']
+    )
+
+    # Economics category
+    def categorize(row):
+        if row['work_share_nf'] > 50 and row['pe_share_nf'] < 40:
+            return 'Work-Heavy'
+        elif row['pe_share_nf'] > 50 and row['work_share_nf'] < 40:
+            return 'PE-Heavy'
+        else:
+            return 'Balanced'
+
+    df['econ_category'] = df.apply(categorize, axis=1)
+
+    return df
+
+
+@st.cache_data(ttl=3600)
+def get_cpt_trend_data(hcpcs, locality_id):
+    """Get trend data for a specific CPT across years."""
+    conn = get_connection()
+
+    query = f"""
+        SELECT
+            a.year,
+            a.w_rvu,
+            a.pe_rvu_facility,
+            a.pe_rvu_nonfacility,
+            a.mp_rvu,
+            a.allowed_facility,
+            a.allowed_nonfacility,
+            COALESCE(a.w_rvu, 0) + COALESCE(a.pe_rvu_nonfacility, 0) + COALESCE(a.mp_rvu, 0) as total_rvu_nf,
+            COALESCE(a.w_rvu, 0) + COALESCE(a.pe_rvu_facility, 0) + COALESCE(a.mp_rvu, 0) as total_rvu_f
+        FROM drinf.v_mpfs_allowed a
+        WHERE a.hcpcs = '{hcpcs}'
+          AND a.locality_id = '{locality_id}'
+          AND a.modifier IS NULL
+        ORDER BY a.year
+    """
+    df = pd.read_sql(query, conn)
+
+    if len(df) > 0:
+        df['work_share_nf'] = df['w_rvu'] / df['total_rvu_nf'] * 100
+        df['pe_share_nf'] = df['pe_rvu_nonfacility'] / df['total_rvu_nf'] * 100
+        df['work_share_f'] = df['w_rvu'] / df['total_rvu_f'] * 100
+        df['pe_share_f'] = df['pe_rvu_facility'] / df['total_rvu_f'] * 100
+        df['site_gap'] = df['allowed_nonfacility'] - df['allowed_facility']
+
+    return df
