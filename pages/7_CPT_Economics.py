@@ -98,7 +98,7 @@ try:
     # =========================================================================
     st.divider()
 
-    cat_col, cpt_col = st.columns([1, 2])
+    cat_col, mod_col, cpt_col = st.columns([1, 0.8, 2])
 
     with cat_col:
         selected_category = st.selectbox(
@@ -108,12 +108,24 @@ try:
             help="Quick filter by CPT range"
         )
 
-    # Apply category filter to get working dataset
+    with mod_col:
+        base_codes_only = st.checkbox(
+            "Base codes only",
+            value=True,
+            help="Exclude modifier variants (26, TC, etc.)"
+        )
+
+    # Apply filters to get working dataset
+    df = df_full.copy()
+
+    # Filter modifiers
+    if base_codes_only:
+        df = df[df['modifier'].isna()].copy()
+
+    # Filter category
     cat_range = CPT_CATEGORIES[selected_category]
     if cat_range:
-        df = df_full[(df_full['hcpcs'] >= cat_range[0]) & (df_full['hcpcs'] <= cat_range[1])].copy()
-    else:
-        df = df_full.copy()
+        df = df[(df['hcpcs'] >= cat_range[0]) & (df['hcpcs'] <= cat_range[1])].copy()
 
     # Limit for performance
     size_col = 'total_medicare_dollars' if data_mode == 'util' and 'total_medicare_dollars' in df.columns else 'total_rvu_nf'
