@@ -103,7 +103,7 @@ try:
              'type': 'delta', 'running_total': decomp['prior_allowed'] + decomp['cf_effect']},
             {'category': 'GPCI Effect', 'value': decomp['gpci_effect'],
              'type': 'delta', 'running_total': decomp['prior_allowed'] + decomp['cf_effect'] + decomp['gpci_effect']},
-            {'category': 'RVU Effect', 'value': decomp['rvu_effect'],
+            {'category': 'RVU Effect (Total)', 'value': decomp['rvu_effect'],
              'type': 'delta', 'running_total': decomp['prior_allowed'] + decomp['cf_effect'] + decomp['gpci_effect'] + decomp['rvu_effect']},
             {'category': f'Current Year ({selected_year})', 'value': decomp['current_allowed'],
              'type': 'end', 'running_total': decomp['current_allowed']}
@@ -207,10 +207,12 @@ try:
         with comp_col3:
             rvu_pct = (decomp['rvu_effect'] / decomp['prior_allowed'] * 100) if decomp['prior_allowed'] else None
             st.metric(
-                "RVU Effect",
+                "RVU Effect (Total)",
                 format_currency(decomp['rvu_effect']),
                 f"{rvu_pct:+.1f}%" if rvu_pct else None,
-                help=f"Work RVU changed from {decomp['w_rvu_py']:.2f} to {decomp['w_rvu']:.2f}"
+                help="Combined effect of Work RVU + PE RVU + MP RVU changes. "
+                     f"Work RVU: {decomp['w_rvu_py']:.2f} -> {decomp['w_rvu']:.2f}. "
+                     "PE and MP RVU changes also contribute to this effect."
             )
 
         st.divider()
@@ -257,10 +259,10 @@ try:
             display_df['interaction'] = display_df['total_change'] - display_df['sum_check']
 
             display_df.columns = ['Year', 'Prior $', 'Current $', 'Total Chg',
-                                  'CF Effect', 'GPCI Effect', 'RVU Effect', 'Sum Check', 'Interaction']
+                                  'CF Effect', 'GPCI Effect', 'RVU Effect (Total)', 'Sum Check', 'Interaction']
 
             # Format
-            for col in ['Prior $', 'Current $', 'Total Chg', 'CF Effect', 'GPCI Effect', 'RVU Effect', 'Sum Check', 'Interaction']:
+            for col in ['Prior $', 'Current $', 'Total Chg', 'CF Effect', 'GPCI Effect', 'RVU Effect (Total)', 'Sum Check', 'Interaction']:
                 display_df[col] = display_df[col].apply(lambda x: format_currency(x))
 
             st.dataframe(display_df, use_container_width=True, hide_index=True)

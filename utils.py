@@ -5,13 +5,26 @@ import streamlit as st
 import pandas as pd
 import psycopg2
 
-# Database configuration
-DB_CONFIG = {
-    "host": "127.0.0.1",
-    "database": "postgres",
-    "user": "postgres",
-    "password": "lolsk8s"
-}
+# Database configuration - uses Streamlit secrets in production
+def get_db_config():
+    """Get database config from Streamlit secrets or fallback to local."""
+    try:
+        return {
+            "host": st.secrets["database"]["host"],
+            "database": st.secrets["database"]["database"],
+            "user": st.secrets["database"]["user"],
+            "password": st.secrets["database"]["password"],
+            "port": st.secrets["database"]["port"],
+        }
+    except Exception:
+        # Fallback for local development
+        return {
+            "host": "127.0.0.1",
+            "database": "postgres",
+            "user": "postgres",
+            "password": "lolsk8s",
+            "port": 5432,
+        }
 
 # Color palette (Stephen Few - muted, semantic consistency)
 COLORS = {
@@ -30,7 +43,7 @@ NON_PAYABLE_STATUS = ['B', 'I', 'N', 'X', 'E', 'P']
 @st.cache_resource
 def get_connection():
     """Get database connection (cached)."""
-    return psycopg2.connect(**DB_CONFIG)
+    return psycopg2.connect(**get_db_config())
 
 
 # ============================================================================
