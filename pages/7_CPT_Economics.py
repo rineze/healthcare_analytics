@@ -182,7 +182,7 @@ try:
 
     with scatter_col:
         st.subheader("CPT Economics Map")
-        st.caption("Click a point to select that CPT")
+        st.caption("Hover for details. Use search box above to select a CPT.")
 
         # Prepare scatter data
         work_col = 'work_share_nf' if setting_focus == 'nonfacility' else 'work_share_f'
@@ -201,9 +201,6 @@ try:
             'PE-Heavy': '#e65100',
             'Balanced': COLORS['neutral_light']
         }
-
-        # Create scatter with selection
-        selection = alt.selection_point(fields=['hcpcs'], name='select')
 
         scatter = alt.Chart(scatter_df).mark_circle(opacity=0.7).encode(
             x=alt.X(f'{work_col}:Q',
@@ -230,12 +227,10 @@ try:
                 alt.Tooltip('site_gap:Q', title='Gap $', format='$.2f'),
                 alt.Tooltip(f'{pe_col}:Q', title='PE Share %', format='.1f'),
                 alt.Tooltip(f'{work_col}:Q', title='Work Share %', format='.1f'),
-            ],
-            strokeWidth=alt.condition(selection, alt.value(2), alt.value(0)),
-            stroke=alt.condition(selection, alt.value('black'), alt.value(None))
+            ]
         ).properties(
             height=400
-        ).add_params(selection)
+        )
 
         # Reference lines for quadrants
         hline = alt.Chart(pd.DataFrame({'y': [50]})).mark_rule(
@@ -247,16 +242,7 @@ try:
         ).encode(x='x:Q')
 
         chart = scatter + hline + vline
-        event = st.altair_chart(chart, use_container_width=True, on_select="rerun")
-
-        # Handle selection from chart
-        if event and event.selection and 'select' in event.selection:
-            selected_points = event.selection['select']
-            if selected_points and len(selected_points) > 0:
-                selected_hcpcs = selected_points[0].get('hcpcs')
-                if selected_hcpcs:
-                    st.session_state.selected_cpt = selected_hcpcs
-                    st.rerun()
+        st.altair_chart(chart, use_container_width=True)
 
     # =========================================================================
     # SITE-OF-SERVICE GAP LEADERBOARD
