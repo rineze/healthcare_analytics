@@ -4,10 +4,18 @@ Shared utilities for MPFS Analytics Dashboard
 import streamlit as st
 import pandas as pd
 import psycopg2
+import os
+from pathlib import Path
+from dotenv import load_dotenv
 
-# Database configuration - uses Streamlit secrets in production
+# Load shared .env from parent directory (Informatics Tools & Files)
+_env_path = Path(__file__).resolve().parent.parent / ".env"
+load_dotenv(_env_path)
+
+
 def get_db_config():
-    """Get database config from Streamlit secrets or fallback to local."""
+    """Get database config with fallback chain: Streamlit secrets -> .env -> local."""
+    # 1. Try Streamlit secrets (for Streamlit Cloud deployment)
     try:
         return {
             "host": st.secrets["database"]["host"],
@@ -17,14 +25,26 @@ def get_db_config():
             "port": st.secrets["database"]["port"],
         }
     except Exception:
-        # Fallback for local development
+        pass
+
+    # 2. Try environment variables (from shared .env)
+    if os.getenv("SUPABASE_HOST"):
         return {
-            "host": "127.0.0.1",
-            "database": "postgres",
-            "user": "postgres",
-            "password": "lolsk8s",
-            "port": 5432,
+            "host": os.getenv("SUPABASE_HOST"),
+            "database": os.getenv("SUPABASE_DATABASE", "postgres"),
+            "user": os.getenv("SUPABASE_USER", "postgres"),
+            "password": os.getenv("SUPABASE_PASSWORD"),
+            "port": int(os.getenv("SUPABASE_PORT", 5432)),
         }
+
+    # 3. Fallback to local development defaults
+    return {
+        "host": "127.0.0.1",
+        "database": "postgres",
+        "user": "postgres",
+        "password": "lolsk8s",
+        "port": 5432,
+    }
 
 # Color palette (Stephen Few - muted, semantic consistency)
 COLORS = {
