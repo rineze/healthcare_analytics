@@ -128,7 +128,7 @@ def get_available_years():
 # CPT Category definitions
 CPT_CATEGORIES = {
     'E/M': {'range': (99201, 99499), 'prefix': '992'},
-    'Anesthesia': {'range': (00100, 01999), 'prefix': '0'},
+    'Anesthesia': {'range': (100, 1999), 'prefix': '0'},
     'Surgery - Integumentary': {'range': (10000, 19999), 'prefix': '1'},
     'Surgery - Musculoskeletal': {'range': (20000, 29999), 'prefix': '2'},
     'Surgery - Respiratory/Cardio': {'range': (30000, 39999), 'prefix': '3'},
