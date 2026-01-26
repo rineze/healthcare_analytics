@@ -7,12 +7,15 @@ to calculate commercial rates as % of Medicare.
 import streamlit as st
 import pandas as pd
 import altair as alt
-from pathlib import Path
-
-# Add parent to path for utils
-import sys
-sys.path.append(str(Path(__file__).parent.parent))
-from utils import get_connection, COLORS, format_currency, format_percent, CPT_CATEGORIES, classify_cpt, get_cpt_category_list
+from utils import (
+    get_connection,
+    COLORS,
+    format_currency,
+    format_percent,
+    CPT_CATEGORIES,
+    classify_cpt,
+    get_cpt_category_list
+)
 
 st.set_page_config(page_title="Commercial Benchmarks", page_icon="", layout="wide")
 
