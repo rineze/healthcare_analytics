@@ -27,7 +27,20 @@ def get_db_config():
     except Exception:
         pass
 
-    # 2. Try environment variables (from shared .env)
+    # 2. Check USE_LOCAL toggle in .env
+    use_local = os.getenv("USE_LOCAL", "false").lower() == "true"
+
+    if use_local and os.getenv("LOCAL_HOST"):
+        # Use local database for development
+        return {
+            "host": os.getenv("LOCAL_HOST", "127.0.0.1"),
+            "database": os.getenv("LOCAL_DATABASE", "postgres"),
+            "user": os.getenv("LOCAL_USER", "postgres"),
+            "password": os.getenv("LOCAL_PASSWORD", "lolsk8s"),
+            "port": int(os.getenv("LOCAL_PORT", 5432)),
+        }
+
+    # 3. Try Supabase environment variables
     if os.getenv("SUPABASE_HOST"):
         return {
             "host": os.getenv("SUPABASE_HOST"),
@@ -37,7 +50,7 @@ def get_db_config():
             "port": int(os.getenv("SUPABASE_PORT", 5432)),
         }
 
-    # 3. Fallback to local development defaults
+    # 4. Fallback to local development defaults
     return {
         "host": "127.0.0.1",
         "database": "postgres",
@@ -58,6 +71,92 @@ COLORS = {
 
 # Status codes that indicate non-payable codes
 NON_PAYABLE_STATUS = ['B', 'I', 'N', 'X', 'E', 'P']
+
+
+# ============================================================================
+# CPT Category Definitions (shared across pages)
+# ============================================================================
+
+CPT_CATEGORIES = {
+    'E/M': {'range': (99201, 99499), 'description': 'Evaluation & Management'},
+    'Anesthesia': {'range': (100, 1999), 'description': 'Anesthesia Services'},
+    'Surgery - Integumentary': {'range': (10000, 19999), 'description': 'Skin, Breast'},
+    'Surgery - Musculoskeletal': {'range': (20000, 29999), 'description': 'Bones, Joints, Muscles'},
+    'Surgery - Respiratory/Cardio': {'range': (30000, 39999), 'description': 'Respiratory & Cardiovascular'},
+    'Surgery - Digestive': {'range': (40000, 49999), 'description': 'Digestive System'},
+    'Surgery - Urinary/Reproductive': {'range': (50000, 59999), 'description': 'Urinary & Reproductive'},
+    'Surgery - Nervous System': {'range': (60000, 69999), 'description': 'Nervous System, Eye, Ear'},
+    'Radiology': {'range': (70000, 79999), 'description': 'Imaging & Radiation'},
+    'Pathology/Lab': {'range': (80000, 89999), 'description': 'Laboratory & Pathology'},
+    'Medicine': {'range': (90000, 99199), 'description': 'Medicine (non-E/M)'},
+}
+
+# Simple range-based category lookup for dropdowns
+CPT_CATEGORY_RANGES = {
+    "All Codes": None,
+    "E/M (99201-99499)": ("99201", "99499"),
+    "Anesthesia (00100-01999)": ("00100", "01999"),
+    "Surgery - Integumentary (10000-19999)": ("10000", "19999"),
+    "Surgery - Musculoskeletal (20000-29999)": ("20000", "29999"),
+    "Surgery - Respiratory/Cardio (30000-39999)": ("30000", "39999"),
+    "Surgery - Digestive (40000-49999)": ("40000", "49999"),
+    "Surgery - Urinary/Reproductive (50000-59999)": ("50000", "59999"),
+    "Surgery - Nervous System (60000-69999)": ("60000", "69999"),
+    "Radiology (70000-79999)": ("70000", "79999"),
+    "Pathology/Lab (80000-89999)": ("80000", "89999"),
+    "Medicine (90000-99199)": ("90000", "99199"),
+}
+
+
+def classify_cpt(cpt_code):
+    """Classify a CPT code into a category.
+
+    Args:
+        cpt_code: CPT code as string or int
+
+    Returns:
+        Category name string (e.g., 'E/M', 'Radiology', 'Other')
+    """
+    try:
+        code_num = int(cpt_code)
+
+        # E/M codes (99201-99499) - check first as they overlap with Medicine range
+        if 99201 <= code_num <= 99499:
+            return 'E/M'
+        # Anesthesia
+        elif 100 <= code_num <= 1999:
+            return 'Anesthesia'
+        # Surgery categories
+        elif 10000 <= code_num <= 19999:
+            return 'Surgery - Integumentary'
+        elif 20000 <= code_num <= 29999:
+            return 'Surgery - Musculoskeletal'
+        elif 30000 <= code_num <= 39999:
+            return 'Surgery - Respiratory/Cardio'
+        elif 40000 <= code_num <= 49999:
+            return 'Surgery - Digestive'
+        elif 50000 <= code_num <= 59999:
+            return 'Surgery - Urinary/Reproductive'
+        elif 60000 <= code_num <= 69999:
+            return 'Surgery - Nervous System'
+        # Radiology
+        elif 70000 <= code_num <= 79999:
+            return 'Radiology'
+        # Pathology/Lab
+        elif 80000 <= code_num <= 89999:
+            return 'Pathology/Lab'
+        # Medicine (non E/M)
+        elif 90000 <= code_num <= 99199:
+            return 'Medicine'
+        else:
+            return 'Other'
+    except (ValueError, TypeError):
+        return 'Other'
+
+
+def get_cpt_category_list():
+    """Get list of CPT category names for UI dropdowns."""
+    return list(CPT_CATEGORIES.keys()) + ['Other']
 
 
 @st.cache_resource

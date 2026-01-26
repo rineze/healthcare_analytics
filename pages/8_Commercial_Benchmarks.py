@@ -12,7 +12,7 @@ from pathlib import Path
 # Add parent to path for utils
 import sys
 sys.path.append(str(Path(__file__).parent.parent))
-from utils import get_connection, COLORS, format_currency, format_percent
+from utils import get_connection, COLORS, format_currency, format_percent, CPT_CATEGORIES, classify_cpt, get_cpt_category_list
 
 st.set_page_config(page_title="Commercial Benchmarks", page_icon="", layout="wide")
 
@@ -27,19 +27,39 @@ st.markdown("Compare hospital commercial rates against Medicare fee schedule")
 def get_hospitals():
     """Get list of hospitals with price transparency data."""
     conn = get_connection()
-    query = """
-        SELECT DISTINCT
-            h.hospital_id,
-            h.hospital_name,
-            h.state,
-            h.hospital_system,
-            r.data_year,
-            r.load_date
-        FROM drinf.pt_hospitals h
-        JOIN drinf.pt_rates r ON r.hospital_id = h.hospital_id
-        ORDER BY h.hospital_name, r.data_year DESC
-    """
-    return pd.read_sql(query, conn)
+    # Try query with system_name, fall back without it
+    try:
+        query = """
+            SELECT DISTINCT
+                h.hospital_id,
+                h.hospital_name,
+                h.state,
+                h.hospital_system,
+                h.system_name,
+                r.data_year,
+                r.load_date
+            FROM drinf.pt_hospitals h
+            JOIN drinf.pt_rates r ON r.hospital_id = h.hospital_id
+            ORDER BY h.hospital_name, r.data_year DESC
+        """
+        df = pd.read_sql(query, conn)
+    except Exception:
+        # Fallback if system_name column doesn't exist
+        query = """
+            SELECT DISTINCT
+                h.hospital_id,
+                h.hospital_name,
+                h.state,
+                h.hospital_system,
+                r.data_year,
+                r.load_date
+            FROM drinf.pt_hospitals h
+            JOIN drinf.pt_rates r ON r.hospital_id = h.hospital_id
+            ORDER BY h.hospital_name, r.data_year DESC
+        """
+        df = pd.read_sql(query, conn)
+        df['system_name'] = df['hospital_system']  # Use hospital_system as fallback
+    return df
 
 
 @st.cache_data(ttl=3600)
@@ -125,61 +145,6 @@ def get_available_years():
     return df['year'].tolist()
 
 
-# CPT Category definitions
-CPT_CATEGORIES = {
-    'E/M': {'range': (99201, 99499), 'prefix': '992'},
-    'Anesthesia': {'range': (100, 1999), 'prefix': '0'},
-    'Surgery - Integumentary': {'range': (10000, 19999), 'prefix': '1'},
-    'Surgery - Musculoskeletal': {'range': (20000, 29999), 'prefix': '2'},
-    'Surgery - Respiratory/Cardio': {'range': (30000, 39999), 'prefix': '3'},
-    'Surgery - Digestive': {'range': (40000, 49999), 'prefix': '4'},
-    'Surgery - Urinary/Reproductive': {'range': (50000, 59999), 'prefix': '5'},
-    'Surgery - Nervous System': {'range': (60000, 69999), 'prefix': '6'},
-    'Radiology': {'range': (70000, 79999), 'prefix': '7'},
-    'Pathology/Lab': {'range': (80000, 89999), 'prefix': '8'},
-    'Medicine': {'range': (90000, 99199), 'prefix': '9'},
-}
-
-
-def classify_cpt(cpt_code):
-    """Classify a CPT code into a category."""
-    try:
-        code_num = int(cpt_code)
-
-        # E/M codes (99201-99499)
-        if 99201 <= code_num <= 99499:
-            return 'E/M'
-        # Anesthesia
-        elif 100 <= code_num <= 1999:
-            return 'Anesthesia'
-        # Surgery categories
-        elif 10000 <= code_num <= 19999:
-            return 'Surgery - Integumentary'
-        elif 20000 <= code_num <= 29999:
-            return 'Surgery - Musculoskeletal'
-        elif 30000 <= code_num <= 39999:
-            return 'Surgery - Respiratory/Cardio'
-        elif 40000 <= code_num <= 49999:
-            return 'Surgery - Digestive'
-        elif 50000 <= code_num <= 59999:
-            return 'Surgery - Urinary/Reproductive'
-        elif 60000 <= code_num <= 69999:
-            return 'Surgery - Nervous System'
-        # Radiology
-        elif 70000 <= code_num <= 79999:
-            return 'Radiology'
-        # Pathology/Lab
-        elif 80000 <= code_num <= 89999:
-            return 'Pathology/Lab'
-        # Medicine (non E/M)
-        elif 90000 <= code_num <= 99199:
-            return 'Medicine'
-        else:
-            return 'Other'
-    except (ValueError, TypeError):
-        return 'Other'
-
-
 def get_all_payer_comparison(hospital_rates, medicare_df, setting_col, agg_func='median'):
     """Get comparison data for all payers."""
     results = []
@@ -234,7 +199,11 @@ st.sidebar.header("Settings")
 
 # Hospital selector
 hospital_options = hospitals_df.drop_duplicates(['hospital_id', 'hospital_name', 'state'])
-hospital_labels = [f"{row['hospital_name']} ({row['state']})" for _, row in hospital_options.iterrows()]
+hospital_labels = [
+    f"{row['hospital_name']} ({row['state']})" +
+    (f" - {row['system_name']}" if pd.notna(row.get('system_name')) else "")
+    for _, row in hospital_options.iterrows()
+]
 selected_hospital_idx = st.sidebar.selectbox(
     "Hospital",
     options=range(len(hospital_labels)),
@@ -305,6 +274,15 @@ cpt_filter = st.sidebar.text_input(
     help="Filter to specific CPT codes or prefixes"
 )
 
+# CPT Category filter
+cpt_category_options = get_cpt_category_list()
+selected_categories = st.sidebar.multiselect(
+    "CPT Categories",
+    options=cpt_category_options,
+    default=cpt_category_options,
+    help="Filter to specific CPT categories"
+)
+
 # Aggregation method for duplicate CPT/payer combinations
 agg_method = st.sidebar.radio(
     "Rate Aggregation",
@@ -341,12 +319,19 @@ merged = payer_agg.merge(
     left_on='cpt',
     right_on='hcpcs',
     how='inner',
-    suffixes=('_echn', '_medicare')
+    suffixes=('_hospital', '_medicare')
 )
 
 # Calculate % of Medicare
 merged['medicare_rate'] = merged[setting_col]
 merged['pct_of_medicare'] = (merged['negotiated_rate'] / merged['medicare_rate'] * 100).round(1)
+
+# Add category classification
+merged['category'] = merged['cpt'].apply(classify_cpt)
+
+# Filter to selected categories
+if selected_categories and len(selected_categories) < len(cpt_category_options):
+    merged = merged[merged['category'].isin(selected_categories)]
 
 # Filter out invalid comparisons
 merged = merged[
@@ -360,7 +345,7 @@ merged = merged[
 # -----------------------------------------------------------------------------
 
 if len(merged) == 0:
-    st.warning("No matching CPT codes found between ECHN and Medicare data.")
+    st.warning("No matching CPT codes found between hospital and Medicare data.")
     st.stop()
 
 # KPIs
@@ -571,10 +556,11 @@ st.subheader("Category Analysis: All Payers vs Medicare")
 # Get comparison data for all payers
 all_payer_data = get_all_payer_comparison(hospital_rates, medicare_df, setting_col)
 
-if len(all_payer_data) > 0:
-    # Add category to current merged data too
-    merged['category'] = merged['cpt'].apply(classify_cpt)
+# Apply category filter to all payer data
+if len(all_payer_data) > 0 and selected_categories and len(selected_categories) < len(cpt_category_options):
+    all_payer_data = all_payer_data[all_payer_data['category'].isin(selected_categories)]
 
+if len(all_payer_data) > 0:
     # Calculate median % of Medicare by category and payer
     category_summary = all_payer_data.groupby(['category', 'payer']).agg({
         'pct_of_medicare': 'median',
@@ -650,7 +636,8 @@ if len(all_payer_data) > 0:
 
             # Pivot for easier reading
             pivot_df = chart_data.pivot(index='Category', columns='Payer', values='Median % of Medicare')
-            pivot_df = pivot_df.round(0).astype(int).astype(str) + '%'
+            # Handle NaN values - show as "-" for missing data
+            pivot_df = pivot_df.apply(lambda x: x.apply(lambda v: f"{int(v)}%" if pd.notna(v) else "-"))
 
             st.dataframe(pivot_df, use_container_width=True)
 

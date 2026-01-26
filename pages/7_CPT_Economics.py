@@ -13,21 +13,14 @@ from utils import (
     get_cpt_trend_data,
     COLORS,
     format_currency,
-    format_percent
+    format_percent,
+    CPT_CATEGORY_RANGES
 )
 
 st.set_page_config(page_title="CPT Economics", page_icon="$", layout="wide")
 
-# Category presets for quick filtering
-CPT_CATEGORIES = {
-    "All Codes": None,
-    "Radiology (70000-79999)": ("70000", "79999"),
-    "Pathology (80000-89999)": ("80000", "89999"),
-    "E/M (99000-99499)": ("99000", "99499"),
-    "Surgery (10000-69999)": ("10000", "69999"),
-    "Medicine (90000-99199)": ("90000", "99199"),
-    "Anesthesia (00100-01999)": ("00100", "01999"),
-}
+# Use shared category definitions
+CPT_CATEGORIES = CPT_CATEGORY_RANGES
 
 # Initialize session state
 if 'selected_cpts' not in st.session_state:
