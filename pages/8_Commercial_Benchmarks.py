@@ -13,6 +13,7 @@ from utils import (
     format_currency,
     format_percent,
     CPT_CATEGORIES,
+    CODE_GROUPS,
     classify_cpt,
     get_cpt_category_list
 )
@@ -69,7 +70,7 @@ def get_hospitals():
 def get_hospital_rates(hospital_id, data_year):
     """Get price transparency rates for a hospital."""
     conn = get_connection()
-    query = f"""
+    query = """
         SELECT
             cpt_code as cpt,
             description,
@@ -79,26 +80,26 @@ def get_hospital_rates(hospital_id, data_year):
             gross_charge,
             setting
         FROM drinf.pt_rates
-        WHERE hospital_id = {hospital_id}
-          AND data_year = {data_year}
+        WHERE hospital_id = %s
+          AND data_year = %s
           AND negotiated_rate IS NOT NULL
     """
-    return pd.read_sql(query, conn)
+    return pd.read_sql(query, conn, params=[int(hospital_id), int(data_year)])
 
 
 @st.cache_data(ttl=3600)
 def get_payers_for_hospital(hospital_id, data_year):
     """Get list of payers for a hospital."""
     conn = get_connection()
-    query = f"""
+    query = """
         SELECT DISTINCT payer_name
         FROM drinf.pt_rates
-        WHERE hospital_id = {hospital_id}
-          AND data_year = {data_year}
+        WHERE hospital_id = %s
+          AND data_year = %s
           AND payer_name IS NOT NULL
         ORDER BY payer_name
     """
-    df = pd.read_sql(query, conn)
+    df = pd.read_sql(query, conn, params=[int(hospital_id), int(data_year)])
     return df['payer_name'].tolist()
 
 
@@ -106,13 +107,13 @@ def get_payers_for_hospital(hospital_id, data_year):
 def get_localities(year):
     """Get list of Medicare localities for a year."""
     conn = get_connection()
-    query = f"""
+    query = """
         SELECT DISTINCT locality_id, locality_name, state
         FROM drinf.v_mpfs_allowed
-        WHERE year = {year}
+        WHERE year = %s
         ORDER BY state, locality_name
     """
-    return pd.read_sql(query, conn)
+    return pd.read_sql(query, conn, params=[int(year)])
 
 
 @st.cache_data(ttl=3600)
@@ -120,7 +121,7 @@ def get_medicare_rates(year, locality_id):
     """Get Medicare allowed amounts for a locality."""
     conn = get_connection()
 
-    query = f"""
+    query = """
         SELECT
             hcpcs,
             modifier,
@@ -131,12 +132,12 @@ def get_medicare_rates(year, locality_id):
             pe_rvu_nonfacility,
             pe_rvu_facility
         FROM drinf.v_mpfs_allowed
-        WHERE year = {year}
-          AND locality_id = '{locality_id}'
+        WHERE year = %s
+          AND locality_id = %s
           AND modifier IS NULL
           AND allowed_nonfacility IS NOT NULL
     """
-    return pd.read_sql(query, conn)
+    return pd.read_sql(query, conn, params=[int(year), str(locality_id)])
 
 
 @st.cache_data(ttl=3600)
@@ -286,6 +287,15 @@ selected_categories = st.sidebar.multiselect(
     help="Filter to specific CPT categories"
 )
 
+# Radiology Groupings filter
+radiology_group_options = list(CODE_GROUPS.keys())
+selected_radiology_groups = st.sidebar.multiselect(
+    "Radiology Groupings (optional)",
+    options=radiology_group_options,
+    default=[],
+    help="Filter to specific radiology procedure groups (e.g., MRI Brain, CT Chest)"
+)
+
 # Aggregation method for duplicate CPT/payer combinations
 agg_method = st.sidebar.radio(
     "Rate Aggregation",
@@ -335,6 +345,14 @@ merged['category'] = merged['cpt'].apply(classify_cpt)
 # Filter to selected categories
 if selected_categories and len(selected_categories) < len(cpt_category_options):
     merged = merged[merged['category'].isin(selected_categories)]
+
+# Apply radiology groupings filter if selected
+if selected_radiology_groups:
+    # Build list of CPT codes from selected groups
+    selected_cpts = []
+    for group in selected_radiology_groups:
+        selected_cpts.extend(CODE_GROUPS.get(group, []))
+    merged = merged[merged['cpt'].isin(selected_cpts)]
 
 # Filter out invalid comparisons
 merged = merged[
@@ -685,3 +703,8 @@ else:
 
 st.markdown("---")
 st.caption(f"Data: {hospital_name} Price Transparency ({selected_data_year}) vs Medicare PFS {selected_year} {locality_name} ({locality_id})")
+
+# Hospital availability footnote
+available_hospitals = hospitals_df.drop_duplicates(['hospital_name', 'state'])[['hospital_name', 'state']].values.tolist()
+hospital_list = ", ".join([f"{h[0]} ({h[1]})" for h in available_hospitals])
+st.caption(f"**Available hospitals:** {hospital_list}")

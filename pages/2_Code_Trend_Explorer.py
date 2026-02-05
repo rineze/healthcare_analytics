@@ -13,6 +13,8 @@ from utils import (
     get_code_trend,
     get_code_yoy_detail,
     get_locality_comparison,
+    CODE_GROUPS,
+    CPT_CATEGORY_RANGES,
     COLORS,
     format_currency,
     format_percent
@@ -23,59 +25,53 @@ st.set_page_config(page_title="Code Trend Explorer", page_icon="$", layout="wide
 st.title("Code Trend Explorer")
 st.caption("Analyze code reimbursement across time and localities with grouping support")
 
-CODE_GROUPS = {
-    "MRI Brain": ["70551", "70552", "70553"],
-    "MRI Spine": ["72141", "72142", "72146", "72147", "72148", "72149", "72156", "72157", "72158"],
-    "CT Head": ["70450", "70460", "70470"],
-    "CT Chest": ["71250", "71260", "71270"],
-    "CT Abdomen/Pelvis": ["74150", "74160", "74170", "74176", "74177", "74178"],
-    "Mammography": ["77065", "77066", "77067"],
-    "X-Ray Chest": ["71045", "71046", "71047", "71048"],
-    "Ultrasound Abdomen": ["76700", "76705", "76770", "76775"],
-    "PET Scan": ["78811", "78812", "78813", "78814", "78815", "78816"],
-    "Nuclear Cardiology": ["78451", "78452", "78453", "78454"],
-    "Colonoscopy": ["45378", "45380", "45381", "45382", "45384", "45385"],
-    "Office Visits (Est)": ["99211", "99212", "99213", "99214", "99215"],
-    "Office Visits (New)": ["99202", "99203", "99204", "99205"],
-}
 
 def get_group_trend_data(hcpcs_codes, locality_id, setting="nonfacility"):
     conn = get_connection()
-    codes_str = ",".join(f"'{c}'" for c in hcpcs_codes)
+    # Validate setting to prevent SQL injection via column name
+    if setting not in ('nonfacility', 'facility'):
+        setting = 'nonfacility'
     allowed_col = f"allowed_{setting}"
+    placeholders = ','.join(['%s'] * len(hcpcs_codes))
+    params = [locality_id] + list(hcpcs_codes)
     query = f"""
         SELECT y.year, y.hcpcs, y.hcpcs_mod, r.description, y.{allowed_col} as allowed, y.w_rvu, y.conversion_factor
         FROM drinf.v_mpfs_allowed_yoy y
         JOIN drinf.v_rvu_clean r ON r.year = y.year AND r.hcpcs_mod = y.hcpcs_mod
-        WHERE y.locality_id = '{locality_id}' AND y.hcpcs IN ({codes_str}) AND y.modifier IS NULL
+        WHERE y.locality_id = %s AND y.hcpcs IN ({placeholders}) AND y.modifier IS NULL
         ORDER BY y.year, y.hcpcs
     """
-    return pd.read_sql(query, conn)
+    return pd.read_sql(query, conn, params=params)
 
 def get_group_yoy_detail(hcpcs_codes, locality_id, setting="nonfacility"):
     conn = get_connection()
-    codes_str = ",".join(f"'{c}'" for c in hcpcs_codes)
+    # Validate setting to prevent SQL injection via column name
+    if setting not in ('nonfacility', 'facility'):
+        setting = 'nonfacility'
+    placeholders = ','.join(['%s'] * len(hcpcs_codes))
+    params = [locality_id] + list(hcpcs_codes)
     query = f"""
         SELECT y.year, y.hcpcs, r.description, y.allowed_{setting} as current_allowed,
                y.allowed_{setting}_py as prior_allowed, y.allowed_{setting}_change as change,
                y.allowed_{setting}_pct_change as pct_change, y.w_rvu, y.conversion_factor
         FROM drinf.v_mpfs_allowed_yoy y
         JOIN drinf.v_rvu_clean r ON r.year = y.year AND r.hcpcs_mod = y.hcpcs_mod
-        WHERE y.locality_id = '{locality_id}' AND y.hcpcs IN ({codes_str}) AND y.modifier IS NULL
+        WHERE y.locality_id = %s AND y.hcpcs IN ({placeholders}) AND y.modifier IS NULL
         ORDER BY y.year DESC, y.hcpcs
     """
-    return pd.read_sql(query, conn)
+    return pd.read_sql(query, conn, params=params)
 
 def get_utilization_weights(hcpcs_codes, year=2023):
     conn = get_connection()
-    codes_str = ",".join(f"'{c}'" for c in hcpcs_codes)
+    placeholders = ','.join(['%s'] * len(hcpcs_codes))
+    params = list(hcpcs_codes) + [year]
     query = f"""
         SELECT hcpcs, SUM(total_services) as total_services
         FROM drinf.medicare_utilization
-        WHERE hcpcs IN ({codes_str}) AND geo_level = 'National' AND year = {year}
+        WHERE hcpcs IN ({placeholders}) AND geo_level = 'National' AND year = %s
         GROUP BY hcpcs
     """
-    return pd.read_sql(query, conn)
+    return pd.read_sql(query, conn, params=params)
 
 def calculate_weighted_yoy(yoy_df, util_df):
     merged = yoy_df.merge(util_df, on="hcpcs", how="left")
@@ -107,7 +103,7 @@ try:
     localities = get_localities()
 
     st.sidebar.header("Selection Mode")
-    selection_mode = st.sidebar.radio("Mode", options=["Single Code", "Code Groups"], index=0)
+    selection_mode = st.sidebar.radio("Mode", options=["Single Code", "Code Groups", "CPT Category"], index=0)
 
     if selection_mode == "Single Code":
         st.sidebar.header("Code Selection")
@@ -120,8 +116,9 @@ try:
         selected_codes = [selected_code.split("-")[0]]
         selected_groups = []
         use_groups = False
-    else:
-        st.sidebar.header("Code Group Selection")
+
+    elif selection_mode == "Code Groups":
+        st.sidebar.header("Radiology Groupings")
         selected_groups = st.sidebar.multiselect("Select Code Groups", options=list(CODE_GROUPS.keys()), default=["MRI Brain"])
         selected_codes = []
         for group in selected_groups:
@@ -132,6 +129,25 @@ try:
             for group in selected_groups:
                 codes_list = ", ".join(CODE_GROUPS[group])
                 st.markdown(f"**{group}:** {codes_list}")
+        use_groups = True
+
+    else:  # CPT Category
+        st.sidebar.header("CPT Category")
+        selected_category = st.sidebar.selectbox(
+            "Select Category",
+            options=[k for k in CPT_CATEGORY_RANGES.keys() if k != "All Codes"],
+            index=8  # Default to Radiology
+        )
+        cat_range = CPT_CATEGORY_RANGES.get(selected_category)
+        if cat_range:
+            st.sidebar.caption(f"Range: {cat_range[0]} - {cat_range[1]}")
+            codes_df = get_code_list(year=latest_year, payable_only=True)
+            all_codes = codes_df["hcpcs"].tolist()
+            selected_codes = [c for c in all_codes if cat_range[0] <= c <= cat_range[1]][:20]
+            st.sidebar.caption(f"Using top 20 codes in range")
+        else:
+            selected_codes = []
+        selected_groups = [selected_category]
         use_groups = True
 
     st.sidebar.markdown("---")
@@ -337,3 +353,7 @@ except Exception as e:
     st.error(f"Error loading data: {e}")
     st.info("Ensure the database is running and analytics views are created.")
     st.code(str(e))
+
+# Footer with data source footnote
+st.markdown("---")
+st.caption("Medicare utilization data: CMS Medicare Physician & Other Practitioners Public Use File (2023, National)")

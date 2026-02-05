@@ -72,6 +72,26 @@ COLORS = {
 # Status codes that indicate non-payable codes
 NON_PAYABLE_STATUS = ['B', 'I', 'N', 'X', 'E', 'P']
 
+# SQL clause for filtering non-payable codes (safe - no user input)
+STATUS_FILTER_CLAUSE = f"status_code NOT IN ({','.join(repr(s) for s in NON_PAYABLE_STATUS)})"
+
+# Predefined Code Groups (Radiology Focus + Common E&M)
+CODE_GROUPS = {
+    "MRI Brain": ["70551", "70552", "70553"],
+    "MRI Spine": ["72141", "72142", "72146", "72147", "72148", "72149", "72156", "72157", "72158"],
+    "CT Head": ["70450", "70460", "70470"],
+    "CT Chest": ["71250", "71260", "71270"],
+    "CT Abdomen/Pelvis": ["74150", "74160", "74170", "74176", "74177", "74178"],
+    "Mammography": ["77065", "77066", "77067"],
+    "X-Ray Chest": ["71045", "71046", "71047", "71048"],
+    "Ultrasound Abdomen": ["76700", "76705", "76770", "76775"],
+    "PET Scan": ["78811", "78812", "78813", "78814", "78815", "78816"],
+    "Nuclear Cardiology": ["78451", "78452", "78453", "78454"],
+    "Colonoscopy": ["45378", "45380", "45381", "45382", "45384", "45385"],
+    "Office Visits (Est)": ["99211", "99212", "99213", "99214", "99215"],
+    "Office Visits (New)": ["99202", "99203", "99204", "99205"],
+}
+
 
 # ============================================================================
 # CPT Category Definitions (shared across pages)
@@ -207,22 +227,24 @@ def get_localities():
 def get_code_list(year=None, payable_only=True):
     """Get list of codes with descriptions for dropdown."""
     conn = get_connection()
+    params = []
+    conditions = []
 
-    year_filter = f"WHERE year = {year}" if year else ""
+    if year is not None:
+        conditions.append("year = %s")
+        params.append(year)
     if payable_only:
-        status_filter = f"status_code NOT IN ({','.join(repr(s) for s in NON_PAYABLE_STATUS)})"
-        if year_filter:
-            year_filter += f" AND {status_filter}"
-        else:
-            year_filter = f"WHERE {status_filter}"
+        conditions.append(STATUS_FILTER_CLAUSE)
+
+    where_clause = f"WHERE {' AND '.join(conditions)}" if conditions else ""
 
     query = f"""
         SELECT DISTINCT hcpcs_mod, hcpcs, modifier, description
         FROM drinf.v_rvu_clean
-        {year_filter}
+        {where_clause}
         ORDER BY hcpcs_mod
     """
-    return pd.read_sql(query, conn)
+    return pd.read_sql(query, conn, params=params if params else None)
 
 
 # ============================================================================
@@ -234,18 +256,16 @@ def get_summary_stats(year, payable_only=True):
     """Get summary statistics for a given year."""
     conn = get_connection()
 
-    status_filter = ""
-    if payable_only:
-        status_filter = f"AND status_code NOT IN ({','.join(repr(s) for s in NON_PAYABLE_STATUS)})"
+    status_filter = f"AND {STATUS_FILTER_CLAUSE}" if payable_only else ""
 
     query = f"""
         SELECT
             COUNT(DISTINCT hcpcs_mod) as total_codes,
             COUNT(DISTINCT hcpcs) as unique_hcpcs
         FROM drinf.v_rvu_clean
-        WHERE year = {year} {status_filter}
+        WHERE year = %s {status_filter}
     """
-    return pd.read_sql(query, conn).iloc[0]
+    return pd.read_sql(query, conn, params=[year]).iloc[0]
 
 
 @st.cache_data(ttl=3600)
@@ -262,15 +282,11 @@ def get_top_movers(year, locality_id, n=15, direction='increase', setting='nonfa
     """
     conn = get_connection()
 
-    status_filter = ""
-    if payable_only:
-        status_filter = f"AND r.status_code NOT IN ({','.join(repr(s) for s in NON_PAYABLE_STATUS)})"
+    # Validate setting to prevent SQL injection via column names
+    if setting not in ('nonfacility', 'facility'):
+        setting = 'nonfacility'
 
-    allowed_col = f"allowed_{setting}"
-    allowed_py_col = f"allowed_{setting}_py"
-    change_col = f"allowed_{setting}_change"
-    pct_change_col = f"allowed_{setting}_pct_change"
-
+    status_filter = f"AND r.{STATUS_FILTER_CLAUSE}" if payable_only else ""
     sort_order = "DESC" if direction == 'increase' else "ASC"
 
     query = f"""
@@ -278,23 +294,23 @@ def get_top_movers(year, locality_id, n=15, direction='increase', setting='nonfa
             y.hcpcs,
             y.modifier,
             r.description,
-            y.{allowed_py_col} as prior_year,
-            y.{allowed_col} as current_year,
-            y.{change_col} as change,
-            y.{pct_change_col} as pct_change,
+            y.allowed_{setting}_py as prior_year,
+            y.allowed_{setting} as current_year,
+            y.allowed_{setting}_change as change,
+            y.allowed_{setting}_pct_change as pct_change,
             y.w_rvu,
             y.pe_rvu_{setting},
             y.mp_rvu
         FROM drinf.v_mpfs_allowed_yoy y
         JOIN drinf.v_rvu_clean r ON r.year = y.year AND r.hcpcs_mod = y.hcpcs_mod
-        WHERE y.year = {year}
-          AND y.locality_id = '{locality_id}'
-          AND y.{change_col} IS NOT NULL
+        WHERE y.year = %s
+          AND y.locality_id = %s
+          AND y.allowed_{setting}_change IS NOT NULL
           {status_filter}
-        ORDER BY y.{change_col} {sort_order}
-        LIMIT {n}
+        ORDER BY y.allowed_{setting}_change {sort_order}
+        LIMIT %s
     """
-    return pd.read_sql(query, conn)
+    return pd.read_sql(query, conn, params=[year, locality_id, n])
 
 
 @st.cache_data(ttl=3600)
@@ -302,23 +318,22 @@ def get_payment_change_distribution(year, locality_id, setting='nonfacility', pa
     """Get distribution of payment changes for histogram."""
     conn = get_connection()
 
-    status_filter = ""
-    if payable_only:
-        status_filter = f"AND r.status_code NOT IN ({','.join(repr(s) for s in NON_PAYABLE_STATUS)})"
+    if setting not in ('nonfacility', 'facility'):
+        setting = 'nonfacility'
 
-    pct_change_col = f"allowed_{setting}_pct_change"
+    status_filter = f"AND r.{STATUS_FILTER_CLAUSE}" if payable_only else ""
 
     query = f"""
-        SELECT y.{pct_change_col} as pct_change
+        SELECT y.allowed_{setting}_pct_change as pct_change
         FROM drinf.v_mpfs_allowed_yoy y
         JOIN drinf.v_rvu_clean r ON r.year = y.year AND r.hcpcs_mod = y.hcpcs_mod
-        WHERE y.year = {year}
-          AND y.locality_id = '{locality_id}'
-          AND y.{pct_change_col} IS NOT NULL
-          AND y.{pct_change_col} BETWEEN -50 AND 50
+        WHERE y.year = %s
+          AND y.locality_id = %s
+          AND y.allowed_{setting}_pct_change IS NOT NULL
+          AND y.allowed_{setting}_pct_change BETWEEN -50 AND 50
           {status_filter}
     """
-    return pd.read_sql(query, conn)
+    return pd.read_sql(query, conn, params=[year, locality_id])
 
 
 @st.cache_data(ttl=3600)
@@ -326,22 +341,21 @@ def get_codes_with_cuts(year, locality_id, setting='nonfacility', payable_only=T
     """Get count of codes with payment decreases."""
     conn = get_connection()
 
-    status_filter = ""
-    if payable_only:
-        status_filter = f"AND r.status_code NOT IN ({','.join(repr(s) for s in NON_PAYABLE_STATUS)})"
+    if setting not in ('nonfacility', 'facility'):
+        setting = 'nonfacility'
 
-    change_col = f"allowed_{setting}_change"
+    status_filter = f"AND r.{STATUS_FILTER_CLAUSE}" if payable_only else ""
 
     query = f"""
         SELECT COUNT(DISTINCT y.hcpcs_mod) as cut_count
         FROM drinf.v_mpfs_allowed_yoy y
         JOIN drinf.v_rvu_clean r ON r.year = y.year AND r.hcpcs_mod = y.hcpcs_mod
-        WHERE y.year = {year}
-          AND y.locality_id = '{locality_id}'
-          AND y.{change_col} < 0
+        WHERE y.year = %s
+          AND y.locality_id = %s
+          AND y.allowed_{setting}_change < 0
           {status_filter}
     """
-    return pd.read_sql(query, conn).iloc[0]['cut_count']
+    return pd.read_sql(query, conn, params=[year, locality_id]).iloc[0]['cut_count']
 
 
 # ============================================================================
@@ -353,24 +367,28 @@ def get_code_trend(hcpcs_mod, locality_ids, setting='nonfacility'):
     """Get allowed amount trend for a code across localities."""
     conn = get_connection()
 
-    locality_filter = ",".join(f"'{loc}'" for loc in locality_ids)
-    allowed_col = f"allowed_{setting}"
+    if setting not in ('nonfacility', 'facility'):
+        setting = 'nonfacility'
+
+    # Build parameterized IN clause
+    placeholders = ','.join(['%s'] * len(locality_ids))
+    params = [hcpcs_mod] + list(locality_ids)
 
     query = f"""
         SELECT
             y.year,
             y.locality_id,
             g.locality_name,
-            y.{allowed_col} as allowed,
+            y.allowed_{setting} as allowed,
             y.w_rvu,
             y.conversion_factor
         FROM drinf.v_mpfs_allowed_yoy y
         JOIN drinf.v_gpci_clean g ON g.year = y.year AND g.locality_id = y.locality_id
-        WHERE y.hcpcs_mod = '{hcpcs_mod}'
-          AND y.locality_id IN ({locality_filter})
+        WHERE y.hcpcs_mod = %s
+          AND y.locality_id IN ({placeholders})
         ORDER BY y.year, y.locality_id
     """
-    return pd.read_sql(query, conn)
+    return pd.read_sql(query, conn, params=params)
 
 
 @st.cache_data(ttl=3600)
@@ -378,30 +396,30 @@ def get_code_yoy_detail(hcpcs_mod, locality_ids, setting='nonfacility'):
     """Get YoY detail table for a code across localities."""
     conn = get_connection()
 
-    locality_filter = ",".join(f"'{loc}'" for loc in locality_ids)
-    allowed_col = f"allowed_{setting}"
-    allowed_py_col = f"allowed_{setting}_py"
-    change_col = f"allowed_{setting}_change"
-    pct_change_col = f"allowed_{setting}_pct_change"
+    if setting not in ('nonfacility', 'facility'):
+        setting = 'nonfacility'
+
+    placeholders = ','.join(['%s'] * len(locality_ids))
+    params = [hcpcs_mod] + list(locality_ids)
 
     query = f"""
         SELECT
             y.year,
             y.locality_id,
             g.locality_name,
-            y.{allowed_col} as current_allowed,
-            y.{allowed_py_col} as prior_allowed,
-            y.{change_col} as change,
-            y.{pct_change_col} as pct_change,
+            y.allowed_{setting} as current_allowed,
+            y.allowed_{setting}_py as prior_allowed,
+            y.allowed_{setting}_change as change,
+            y.allowed_{setting}_pct_change as pct_change,
             y.w_rvu,
             y.conversion_factor
         FROM drinf.v_mpfs_allowed_yoy y
         JOIN drinf.v_gpci_clean g ON g.year = y.year AND g.locality_id = y.locality_id
-        WHERE y.hcpcs_mod = '{hcpcs_mod}'
-          AND y.locality_id IN ({locality_filter})
+        WHERE y.hcpcs_mod = %s
+          AND y.locality_id IN ({placeholders})
         ORDER BY y.year DESC, g.locality_name
     """
-    return pd.read_sql(query, conn)
+    return pd.read_sql(query, conn, params=params)
 
 
 @st.cache_data(ttl=3600)
@@ -409,24 +427,25 @@ def get_locality_comparison(hcpcs_mod, year, setting='nonfacility', top_n=20):
     """Get payment by locality for bar chart comparison."""
     conn = get_connection()
 
-    allowed_col = f"allowed_{setting}"
+    if setting not in ('nonfacility', 'facility'):
+        setting = 'nonfacility'
 
     query = f"""
         SELECT
             a.locality_id,
             g.locality_name,
-            a.{allowed_col} as allowed,
+            a.allowed_{setting} as allowed,
             a.gpci_work,
             a.gpci_pe,
             a.gpci_mp
         FROM drinf.v_mpfs_allowed a
         JOIN drinf.v_gpci_clean g ON g.year = a.year AND g.locality_id = a.locality_id
-        WHERE a.hcpcs_mod = '{hcpcs_mod}'
-          AND a.year = {year}
-        ORDER BY a.{allowed_col} DESC
-        LIMIT {top_n}
+        WHERE a.hcpcs_mod = %s
+          AND a.year = %s
+        ORDER BY a.allowed_{setting} DESC
+        LIMIT %s
     """
-    return pd.read_sql(query, conn)
+    return pd.read_sql(query, conn, params=[hcpcs_mod, year, top_n])
 
 
 # ============================================================================
@@ -438,7 +457,7 @@ def get_gpci_rankings(year):
     """Get GPCI rankings by locality."""
     conn = get_connection()
 
-    query = f"""
+    query = """
         SELECT
             locality_id,
             locality_name,
@@ -451,10 +470,10 @@ def get_gpci_rankings(year):
             gpci_pe_change,
             gpci_mp_change
         FROM drinf.v_gpci_yoy
-        WHERE year = {year}
+        WHERE year = %s
         ORDER BY (gpci_work + gpci_pe + gpci_mp) / 3.0 DESC
     """
-    return pd.read_sql(query, conn)
+    return pd.read_sql(query, conn, params=[year])
 
 
 @st.cache_data(ttl=3600)
@@ -462,27 +481,26 @@ def get_gpci_yoy_changes(year, component='work', n=15):
     """Get largest GPCI YoY changes."""
     conn = get_connection()
 
-    gpci_col = f"gpci_{component}"
-    gpci_py_col = f"gpci_{component}_py"
-    change_col = f"gpci_{component}_change"
-    pct_change_col = f"gpci_{component}_pct_change"
+    # Validate component
+    if component not in ('work', 'pe', 'mp'):
+        component = 'work'
 
     query = f"""
         SELECT
             locality_id,
             locality_name,
             state,
-            {gpci_py_col} as prior_value,
-            {gpci_col} as current_value,
-            {change_col} as change,
-            {pct_change_col} as pct_change
+            gpci_{component}_py as prior_value,
+            gpci_{component} as current_value,
+            gpci_{component}_change as change,
+            gpci_{component}_pct_change as pct_change
         FROM drinf.v_gpci_yoy
-        WHERE year = {year}
-          AND {gpci_py_col} IS NOT NULL
-        ORDER BY ABS({change_col}) DESC
-        LIMIT {n}
+        WHERE year = %s
+          AND gpci_{component}_py IS NOT NULL
+        ORDER BY ABS(gpci_{component}_change) DESC
+        LIMIT %s
     """
-    return pd.read_sql(query, conn)
+    return pd.read_sql(query, conn, params=[year, n])
 
 
 @st.cache_data(ttl=3600)
@@ -490,17 +508,17 @@ def get_gpci_trend(locality_id):
     """Get GPCI component trends for a locality."""
     conn = get_connection()
 
-    query = f"""
+    query = """
         SELECT
             year,
             gpci_work,
             gpci_pe,
             gpci_mp
         FROM drinf.v_gpci_yoy
-        WHERE locality_id = '{locality_id}'
+        WHERE locality_id = %s
         ORDER BY year
     """
-    return pd.read_sql(query, conn)
+    return pd.read_sql(query, conn, params=[locality_id])
 
 
 # ============================================================================
@@ -512,24 +530,25 @@ def get_locality_spread(hcpcs_mod, year, setting='nonfacility'):
     """Get all localities for spread analysis."""
     conn = get_connection()
 
-    allowed_col = f"allowed_{setting}"
+    if setting not in ('nonfacility', 'facility'):
+        setting = 'nonfacility'
 
     query = f"""
         SELECT
             a.locality_id,
             g.locality_name,
             g.state,
-            a.{allowed_col} as allowed,
+            a.allowed_{setting} as allowed,
             a.gpci_work,
             a.gpci_pe,
             a.gpci_mp
         FROM drinf.v_mpfs_allowed a
         JOIN drinf.v_gpci_clean g ON g.year = a.year AND g.locality_id = a.locality_id
-        WHERE a.hcpcs_mod = '{hcpcs_mod}'
-          AND a.year = {year}
-        ORDER BY a.{allowed_col} DESC
+        WHERE a.hcpcs_mod = %s
+          AND a.year = %s
+        ORDER BY a.allowed_{setting} DESC
     """
-    return pd.read_sql(query, conn)
+    return pd.read_sql(query, conn, params=[hcpcs_mod, year])
 
 
 @st.cache_data(ttl=3600)
@@ -537,20 +556,21 @@ def get_spread_stats(hcpcs_mod, year, setting='nonfacility'):
     """Calculate spread statistics for a code."""
     conn = get_connection()
 
-    allowed_col = f"allowed_{setting}"
+    if setting not in ('nonfacility', 'facility'):
+        setting = 'nonfacility'
 
     query = f"""
         SELECT
-            MAX({allowed_col}) as max_allowed,
-            MIN({allowed_col}) as min_allowed,
-            AVG({allowed_col}) as avg_allowed,
-            STDDEV({allowed_col}) as std_dev,
-            PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY {allowed_col}) as median
+            MAX(allowed_{setting}) as max_allowed,
+            MIN(allowed_{setting}) as min_allowed,
+            AVG(allowed_{setting}) as avg_allowed,
+            STDDEV(allowed_{setting}) as std_dev,
+            PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY allowed_{setting}) as median
         FROM drinf.v_mpfs_allowed
-        WHERE hcpcs_mod = '{hcpcs_mod}'
-          AND year = {year}
+        WHERE hcpcs_mod = %s
+          AND year = %s
     """
-    return pd.read_sql(query, conn).iloc[0]
+    return pd.read_sql(query, conn, params=[hcpcs_mod, year]).iloc[0]
 
 
 # ============================================================================
@@ -562,6 +582,9 @@ def get_decomposition(hcpcs_mod, locality_id, year, setting='nonfacility'):
     """Get decomposition data for waterfall chart."""
     conn = get_connection()
 
+    if setting not in ('nonfacility', 'facility'):
+        setting = 'nonfacility'
+
     query = f"""
         SELECT
             year,
@@ -578,11 +601,11 @@ def get_decomposition(hcpcs_mod, locality_id, year, setting='nonfacility'):
             cf_py,
             conversion_factor
         FROM drinf.v_mpfs_decomp
-        WHERE hcpcs_mod = '{hcpcs_mod}'
-          AND locality_id = '{locality_id}'
-          AND year = {year}
+        WHERE hcpcs_mod = %s
+          AND locality_id = %s
+          AND year = %s
     """
-    df = pd.read_sql(query, conn)
+    df = pd.read_sql(query, conn, params=[hcpcs_mod, locality_id, year])
     return df.iloc[0] if len(df) > 0 else None
 
 
@@ -591,6 +614,9 @@ def get_decomposition_history(hcpcs_mod, locality_id, setting='nonfacility'):
     """Get full decomposition history for a code/locality."""
     conn = get_connection()
 
+    if setting not in ('nonfacility', 'facility'):
+        setting = 'nonfacility'
+
     query = f"""
         SELECT
             year,
@@ -607,11 +633,11 @@ def get_decomposition_history(hcpcs_mod, locality_id, setting='nonfacility'):
             cf_py,
             conversion_factor
         FROM drinf.v_mpfs_decomp
-        WHERE hcpcs_mod = '{hcpcs_mod}'
-          AND locality_id = '{locality_id}'
+        WHERE hcpcs_mod = %s
+          AND locality_id = %s
         ORDER BY year DESC
     """
-    return pd.read_sql(query, conn)
+    return pd.read_sql(query, conn, params=[hcpcs_mod, locality_id])
 
 
 # ============================================================================
@@ -657,11 +683,12 @@ def get_codes_analysis(hcpcs_codes, year, locality_id='AL-00', setting='nonfacil
     """
     conn = get_connection()
 
-    codes_str = ",".join(f"'{c}'" for c in hcpcs_codes)
-    allowed_col = f"allowed_{setting}"
-    allowed_py_col = f"allowed_{setting}_py"
-    change_col = f"allowed_{setting}_change"
-    pct_change_col = f"allowed_{setting}_pct_change"
+    if setting not in ('nonfacility', 'facility'):
+        setting = 'nonfacility'
+
+    # Build parameterized IN clause
+    placeholders = ','.join(['%s'] * len(hcpcs_codes))
+    base_params = [year, locality_id] + list(hcpcs_codes)
 
     # Get YoY data for selected codes
     query = f"""
@@ -670,20 +697,20 @@ def get_codes_analysis(hcpcs_codes, year, locality_id='AL-00', setting='nonfacil
             y.modifier,
             y.hcpcs_mod,
             r.description,
-            y.{allowed_py_col} as prior_allowed,
-            y.{allowed_col} as current_allowed,
-            y.{change_col} as change,
-            y.{pct_change_col} as pct_change,
+            y.allowed_{setting}_py as prior_allowed,
+            y.allowed_{setting} as current_allowed,
+            y.allowed_{setting}_change as change,
+            y.allowed_{setting}_pct_change as pct_change,
             y.w_rvu,
             y.conversion_factor
         FROM drinf.v_mpfs_allowed_yoy y
         JOIN drinf.v_rvu_clean r ON r.year = y.year AND r.hcpcs_mod = y.hcpcs_mod
-        WHERE y.year = {year}
-          AND y.locality_id = '{locality_id}'
-          AND y.hcpcs IN ({codes_str})
-        ORDER BY y.{change_col} DESC
+        WHERE y.year = %s
+          AND y.locality_id = %s
+          AND y.hcpcs IN ({placeholders})
+        ORDER BY y.allowed_{setting}_change DESC
     """
-    codes_df = pd.read_sql(query, conn)
+    codes_df = pd.read_sql(query, conn, params=base_params)
 
     if len(codes_df) == 0:
         return None
@@ -694,46 +721,32 @@ def get_codes_analysis(hcpcs_codes, year, locality_id='AL-00', setting='nonfacil
     codes_increased = (codes_df['change'] > 0).sum()
     codes_decreased = (codes_df['change'] < 0).sum()
 
-    # Get geographic variation for these codes
-    geo_query = f"""
-        SELECT
-            a.hcpcs,
-            g.locality_name,
-            a.{allowed_col} as allowed
-        FROM drinf.v_mpfs_allowed a
-        JOIN drinf.v_gpci_clean g ON g.year = a.year AND g.locality_id = a.locality_id
-        WHERE a.year = {year}
-          AND a.hcpcs IN ({codes_str})
-          AND a.modifier IS NULL
-    """
-    geo_df = pd.read_sql(query, conn)
-
     # Find highest paying locality for primary code
     primary_code = hcpcs_codes[0]
     geo_query_primary = f"""
         SELECT
             g.locality_name,
             g.locality_id,
-            a.{allowed_col} as allowed
+            a.allowed_{setting} as allowed
         FROM drinf.v_mpfs_allowed a
         JOIN drinf.v_gpci_clean g ON g.year = a.year AND g.locality_id = a.locality_id
-        WHERE a.year = {year}
-          AND a.hcpcs = '{primary_code}'
+        WHERE a.year = %s
+          AND a.hcpcs = %s
           AND a.modifier IS NULL
-        ORDER BY a.{allowed_col} DESC
+        ORDER BY a.allowed_{setting} DESC
         LIMIT 5
     """
-    top_localities = pd.read_sql(geo_query_primary, conn)
+    top_localities = pd.read_sql(geo_query_primary, conn, params=[year, primary_code])
 
     # Get national average
     avg_query = f"""
-        SELECT AVG({allowed_col}) as avg_allowed
+        SELECT AVG(allowed_{setting}) as avg_allowed
         FROM drinf.v_mpfs_allowed
-        WHERE year = {year}
-          AND hcpcs = '{primary_code}'
+        WHERE year = %s
+          AND hcpcs = %s
           AND modifier IS NULL
     """
-    national_avg = pd.read_sql(avg_query, conn).iloc[0]['avg_allowed']
+    national_avg = pd.read_sql(avg_query, conn, params=[year, primary_code]).iloc[0]['avg_allowed']
 
     return {
         'codes_df': codes_df,
@@ -755,8 +768,13 @@ def get_utilization_data(hcpcs_codes, year=None):
     """
     conn = get_connection()
 
-    codes_str = ",".join(f"'{c}'" for c in hcpcs_codes)
-    year_filter = f"AND year = {year}" if year else ""
+    placeholders = ','.join(['%s'] * len(hcpcs_codes))
+    params = list(hcpcs_codes)
+
+    year_filter = ""
+    if year:
+        year_filter = "AND year = %s"
+        params.append(year)
 
     query = f"""
         SELECT
@@ -769,12 +787,12 @@ def get_utilization_data(hcpcs_codes, year=None):
             avg_payment_amt,
             (total_services * avg_payment_amt) as total_medicare_payment
         FROM drinf.medicare_utilization
-        WHERE hcpcs IN ({codes_str})
+        WHERE hcpcs IN ({placeholders})
           AND geo_level = 'National'
           {year_filter}
         ORDER BY year DESC, total_services DESC
     """
-    return pd.read_sql(query, conn)
+    return pd.read_sql(query, conn, params=params)
 
 
 def get_utilization_summary(hcpcs_codes, year):
@@ -784,7 +802,8 @@ def get_utilization_summary(hcpcs_codes, year):
     """
     conn = get_connection()
 
-    codes_str = ",".join(f"'{c}'" for c in hcpcs_codes)
+    placeholders = ','.join(['%s'] * len(hcpcs_codes))
+    params = list(hcpcs_codes) + [year]
 
     query = f"""
         SELECT
@@ -792,11 +811,11 @@ def get_utilization_summary(hcpcs_codes, year):
             SUM(total_beneficiaries) as total_beneficiaries,
             SUM(total_services * avg_payment_amt) as total_medicare_payment
         FROM drinf.medicare_utilization
-        WHERE hcpcs IN ({codes_str})
+        WHERE hcpcs IN ({placeholders})
           AND geo_level = 'National'
-          AND year = {year}
+          AND year = %s
     """
-    result = pd.read_sql(query, conn).iloc[0]
+    result = pd.read_sql(query, conn, params=params).iloc[0]
 
     return {
         'total_services': int(result['total_services']) if pd.notna(result['total_services']) else 0,
@@ -886,27 +905,35 @@ These codes represent significant Medicare volume:
     email += f"""
 ---
 
-### Geographic Insight
+### Geographic Variation
 
 """
 
-    if len(top_localities) > 0:
-        top_loc = top_localities.iloc[0]
-        pct_above = ((top_loc['allowed'] - national_avg) / national_avg * 100) if national_avg else 0
-        email += f"**{top_loc['locality_name']}** ({top_loc['locality_id']}) pays **{pct_above:.0f}% above** the national average for these codes.\n\n"
-        email += "**Top paying localities:**\n"
-        for _, loc in top_localities.iterrows():
-            email += f"- {loc['locality_name']}: {format_currency(loc['allowed'])}\n"
+    if len(top_localities) > 0 and national_avg:
+        # Calculate geographic spread
+        max_allowed = top_localities['allowed'].max()
+        min_allowed = top_localities['allowed'].min() if len(top_localities) > 1 else max_allowed * 0.85
+        spread_pct = ((max_allowed - min_allowed) / national_avg * 100) if national_avg else 0
+
+        if spread_pct > 15:
+            email += f"**Significant geographic variation detected** ({spread_pct:.0f}% spread across localities).\n\n"
+            email += f"- **Highest paying:** {top_localities.iloc[0]['locality_name']} ({format_currency(max_allowed)})\n"
+            email += f"- **National baseline:** {format_currency(national_avg)}\n"
+            email += "\n*Consider locality-specific contract strategies for practices in high-GPCI areas.*\n"
+        else:
+            email += f"Geographic variation is **modest** ({spread_pct:.0f}% spread). National rates are reasonably consistent.\n"
+    else:
+        email += "Geographic data not available for these codes.\n"
 
     email += f"""
 ---
 
 ### Methodology
 
-- **Data Source:** CMS Physician Fee Schedule Relative Value Files + Medicare Utilization Data
+- **Fee Schedule Data:** CMS Physician Fee Schedule Relative Value Files (PPRRVU)
+- **Utilization Data:** CMS Medicare Physician & Other Practitioners Public Use File (2023)
 - **Reference Locality:** Alabama (AL-00) used for national baseline
 - **Setting:** Non-Facility
-- **Utilization Year:** 2023 (most recent available)
 
 """
 
@@ -925,7 +952,7 @@ def get_cpt_economics_data(year, locality_id):
     """Get CPT economics data with RVU shares and site-of-service gaps."""
     conn = get_connection()
 
-    query = f"""
+    query = """
         SELECT
             a.hcpcs,
             a.modifier,
@@ -948,14 +975,14 @@ def get_cpt_economics_data(year, locality_id):
                 THEN (a.allowed_nonfacility - a.allowed_facility) / a.allowed_facility * 100
                 ELSE NULL END as site_gap_pct
         FROM drinf.v_mpfs_allowed a
-        WHERE a.year = {year}
-          AND a.locality_id = '{locality_id}'
+        WHERE a.year = %s
+          AND a.locality_id = %s
           AND a.status_code NOT IN ('B', 'I', 'N', 'X', 'E', 'P')
           AND a.allowed_nonfacility IS NOT NULL
           AND a.allowed_facility IS NOT NULL
           AND (COALESCE(a.w_rvu, 0) + COALESCE(a.pe_rvu_nonfacility, 0) + COALESCE(a.mp_rvu, 0)) > 0
     """
-    df = pd.read_sql(query, conn)
+    df = pd.read_sql(query, conn, params=[year, locality_id])
 
     # Calculate shares
     df['work_share_nf'] = df['w_rvu'] / df['total_rvu_nf'] * 100
@@ -992,7 +1019,7 @@ def get_cpt_economics_with_util(year, locality_id, util_year=2023):
     """Get CPT economics joined with utilization data."""
     conn = get_connection()
 
-    query = f"""
+    query = """
         SELECT
             a.hcpcs,
             a.modifier,
@@ -1024,17 +1051,17 @@ def get_cpt_economics_with_util(year, locality_id, util_year=2023):
                    SUM(total_beneficiaries) as total_beneficiaries,
                    AVG(avg_payment_amt) as avg_payment_amt
             FROM drinf.medicare_utilization
-            WHERE year = {util_year} AND geo_level = 'National'
+            WHERE year = %s AND geo_level = 'National'
             GROUP BY hcpcs
         ) u ON a.hcpcs = u.hcpcs
-        WHERE a.year = {year}
-          AND a.locality_id = '{locality_id}'
+        WHERE a.year = %s
+          AND a.locality_id = %s
           AND a.status_code NOT IN ('B', 'I', 'N', 'X', 'E', 'P')
           AND a.allowed_nonfacility IS NOT NULL
           AND a.allowed_facility IS NOT NULL
           AND (COALESCE(a.w_rvu, 0) + COALESCE(a.pe_rvu_nonfacility, 0) + COALESCE(a.mp_rvu, 0)) > 0
     """
-    df = pd.read_sql(query, conn)
+    df = pd.read_sql(query, conn, params=[util_year, year, locality_id])
 
     # Calculate shares
     df['work_share_nf'] = df['w_rvu'] / df['total_rvu_nf'] * 100
@@ -1074,7 +1101,7 @@ def get_cpt_trend_data(hcpcs, locality_id):
     """Get trend data for a specific CPT across years."""
     conn = get_connection()
 
-    query = f"""
+    query = """
         SELECT
             a.year,
             a.w_rvu,
@@ -1086,12 +1113,12 @@ def get_cpt_trend_data(hcpcs, locality_id):
             COALESCE(a.w_rvu, 0) + COALESCE(a.pe_rvu_nonfacility, 0) + COALESCE(a.mp_rvu, 0) as total_rvu_nf,
             COALESCE(a.w_rvu, 0) + COALESCE(a.pe_rvu_facility, 0) + COALESCE(a.mp_rvu, 0) as total_rvu_f
         FROM drinf.v_mpfs_allowed a
-        WHERE a.hcpcs = '{hcpcs}'
-          AND a.locality_id = '{locality_id}'
+        WHERE a.hcpcs = %s
+          AND a.locality_id = %s
           AND a.modifier IS NULL
         ORDER BY a.year
     """
-    df = pd.read_sql(query, conn)
+    df = pd.read_sql(query, conn, params=[hcpcs, locality_id])
 
     if len(df) > 0:
         df['work_share_nf'] = df['w_rvu'] / df['total_rvu_nf'] * 100

@@ -529,3 +529,7 @@ resources consumed.
 except Exception as e:
     st.error(f"Error loading data: {e}")
     st.info("Ensure the database is running and analytics views are created.")
+
+# Footer with data source footnote
+st.markdown("---")
+st.caption("Medicare utilization data (Util-Weighted mode): CMS Medicare Physician & Other Practitioners Public Use File (2023, National)")

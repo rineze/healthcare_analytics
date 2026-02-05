@@ -1,5 +1,5 @@
 """
-Page 5: Change Decomposition
+Page 5: Payment Change Decomposition
 Isolate the drivers of payment change (RVU, GPCI, CF) for a specific code and locality
 """
 import streamlit as st
@@ -16,7 +16,7 @@ from utils import (
     format_percent
 )
 
-st.set_page_config(page_title="Change Decomposition", page_icon="$", layout="wide")
+st.set_page_config(page_title="Payment Change Decomposition", page_icon="$", layout="wide")
 
 st.title("Payment Change Decomposition")
 st.caption("Waterfall analysis: Isolate CF, GPCI, and RVU effects on payment changes")

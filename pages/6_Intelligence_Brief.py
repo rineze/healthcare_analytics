@@ -13,6 +13,8 @@ from utils import (
     get_codes_analysis,
     get_utilization_summary,
     generate_brief_email,
+    CODE_GROUPS,
+    CPT_CATEGORY_RANGES,
     COLORS,
     format_currency,
     format_percent
@@ -77,23 +79,6 @@ def search_healthcare_news(query, num_results=5):
 
 
 # ============================================================================
-# Predefined Code Groups (Radiology Focus)
-# ============================================================================
-
-CODE_GROUPS = {
-    "MRI Brain": ["70551", "70552", "70553"],
-    "MRI Spine": ["72141", "72142", "72146", "72147", "72148", "72149", "72156", "72157", "72158"],
-    "CT Head": ["70450", "70460", "70470"],
-    "CT Chest": ["71250", "71260", "71270"],
-    "CT Abdomen/Pelvis": ["74150", "74160", "74170", "74176", "74177", "74178"],
-    "Mammography": ["77065", "77066", "77067"],
-    "X-Ray Chest": ["71045", "71046", "71047", "71048"],
-    "Ultrasound Abdomen": ["76700", "76705", "76770", "76775"],
-    "PET Scan": ["78811", "78812", "78813", "78814", "78815", "78816"],
-    "Nuclear Cardiology": ["78451", "78452", "78453", "78454"],
-}
-
-# ============================================================================
 # Sidebar - Configuration
 # ============================================================================
 
@@ -113,25 +98,52 @@ st.sidebar.markdown("---")
 
 st.sidebar.header("2. Select Codes")
 
-# Code group selector
-selected_group = st.sidebar.selectbox(
-    "Code Group",
-    options=list(CODE_GROUPS.keys()),
-    index=0
+# Selection method
+selection_method = st.sidebar.radio(
+    "Selection Method",
+    options=["Radiology Groupings", "CPT Category", "Custom Codes"],
+    horizontal=True
 )
 
-# Show selected codes
-selected_codes = CODE_GROUPS[selected_group]
-st.sidebar.caption(f"Codes: {', '.join(selected_codes)}")
+selected_codes = []
+selected_group = None
 
-# Allow custom codes
-custom_codes = st.sidebar.text_input(
-    "Or enter custom codes (comma-separated)",
-    placeholder="70553, 70552, 70551"
-)
+if selection_method == "Radiology Groupings":
+    selected_group = st.sidebar.selectbox(
+        "Code Group",
+        options=list(CODE_GROUPS.keys()),
+        index=0
+    )
+    selected_codes = CODE_GROUPS[selected_group]
+    st.sidebar.caption(f"Codes: {', '.join(selected_codes)}")
 
-if custom_codes:
-    selected_codes = [c.strip() for c in custom_codes.split(",") if c.strip()]
+elif selection_method == "CPT Category":
+    selected_category = st.sidebar.selectbox(
+        "CPT Category",
+        options=[k for k in CPT_CATEGORY_RANGES.keys() if k != "All Codes"],
+        index=8  # Default to Radiology
+    )
+    selected_group = selected_category
+    # For category selection, we'll use a range filter approach
+    cat_range = CPT_CATEGORY_RANGES.get(selected_category)
+    if cat_range:
+        st.sidebar.caption(f"Range: {cat_range[0]} - {cat_range[1]}")
+        # Get codes from database in this range
+        try:
+            all_codes = get_code_list()
+            selected_codes = [c for c in all_codes if cat_range[0] <= c <= cat_range[1]][:20]
+            st.sidebar.caption(f"Using top 20 codes in range")
+        except:
+            selected_codes = []
+
+else:  # Custom Codes
+    custom_codes = st.sidebar.text_input(
+        "Enter codes (comma-separated)",
+        placeholder="70553, 70552, 70551"
+    )
+    if custom_codes:
+        selected_codes = [c.strip() for c in custom_codes.split(",") if c.strip()]
+    selected_group = "Custom"
 
 st.sidebar.markdown("---")
 
@@ -332,4 +344,5 @@ with col_analysis:
 # ============================================================================
 
 st.markdown("---")
-st.caption(f"Generated {datetime.now().strftime('%Y-%m-%d %H:%M')} | Data: CMS MPFS {selected_year}")
+st.caption(f"Generated {datetime.now().strftime('%Y-%m-%d %H:%M')} | Fee Schedule: CMS MPFS {selected_year}")
+st.caption("Medicare utilization data: CMS Medicare Physician & Other Practitioners Public Use File (2023, National)")

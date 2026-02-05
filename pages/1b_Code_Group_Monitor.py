@@ -11,6 +11,9 @@ from utils import (
     get_localities,
     get_conversion_factors,
     get_utilization_summary,
+    get_code_list,
+    CODE_GROUPS,
+    CPT_CATEGORY_RANGES,
     COLORS,
     format_currency,
     format_percent
@@ -22,34 +25,17 @@ st.title("Code Group Monitor")
 st.caption("Analyze CPT groupings with utilization context and reimbursement component walkthrough")
 
 # ============================================================================
-# Predefined Code Groups
-# ============================================================================
-
-CODE_GROUPS = {
-    "MRI Brain": ["70551", "70552", "70553"],
-    "MRI Spine": ["72141", "72142", "72146", "72147", "72148", "72149", "72156", "72157", "72158"],
-    "CT Head": ["70450", "70460", "70470"],
-    "CT Chest": ["71250", "71260", "71270"],
-    "CT Abdomen/Pelvis": ["74150", "74160", "74170", "74176", "74177", "74178"],
-    "Mammography": ["77065", "77066", "77067"],
-    "X-Ray Chest": ["71045", "71046", "71047", "71048"],
-    "Ultrasound Abdomen": ["76700", "76705", "76770", "76775"],
-    "PET Scan": ["78811", "78812", "78813", "78814", "78815", "78816"],
-    "Nuclear Cardiology": ["78451", "78452", "78453", "78454"],
-    "Colonoscopy": ["45378", "45380", "45381", "45382", "45384", "45385"],
-    "Office Visits (Est)": ["99211", "99212", "99213", "99214", "99215"],
-    "Office Visits (New)": ["99202", "99203", "99204", "99205"],
-}
-
-
-# ============================================================================
 # Local Data Functions
 # ============================================================================
 
 def get_code_group_decomposition(hcpcs_codes, year, locality_id='AL-00', setting='nonfacility'):
     """Get decomposition data for a group of HCPCS codes."""
     conn = get_connection()
-    codes_str = ",".join(f"'{c}'" for c in hcpcs_codes)
+    # Validate setting to prevent SQL injection via column name
+    if setting not in ('nonfacility', 'facility'):
+        setting = 'nonfacility'
+    placeholders = ','.join(['%s'] * len(hcpcs_codes))
+    params = [year, locality_id] + list(hcpcs_codes)
 
     query = f"""
         SELECT
@@ -79,19 +65,20 @@ def get_code_group_decomposition(hcpcs_codes, year, locality_id='AL-00', setting
             d.gpci_mp
         FROM drinf.v_mpfs_decomp d
         JOIN drinf.v_rvu_clean r ON r.year = d.year AND r.hcpcs_mod = d.hcpcs_mod
-        WHERE d.year = {year}
-          AND d.locality_id = '{locality_id}'
-          AND d.hcpcs IN ({codes_str})
+        WHERE d.year = %s
+          AND d.locality_id = %s
+          AND d.hcpcs IN ({placeholders})
           AND d.modifier IS NULL
         ORDER BY d.allowed_{setting} DESC
     """
-    return pd.read_sql(query, conn)
+    return pd.read_sql(query, conn, params=params)
 
 
 def get_utilization_by_code(hcpcs_codes, year=2023):
     """Get utilization data for each code in a list."""
     conn = get_connection()
-    codes_str = ",".join(f"'{c}'" for c in hcpcs_codes)
+    placeholders = ','.join(['%s'] * len(hcpcs_codes))
+    params = list(hcpcs_codes) + [year]
 
     query = f"""
         SELECT
@@ -102,13 +89,13 @@ def get_utilization_by_code(hcpcs_codes, year=2023):
             AVG(avg_payment_amt) as avg_payment,
             SUM(total_services * avg_payment_amt) as total_medicare_payment
         FROM drinf.medicare_utilization
-        WHERE hcpcs IN ({codes_str})
+        WHERE hcpcs IN ({placeholders})
           AND geo_level = 'National'
-          AND year = {year}
+          AND year = %s
         GROUP BY hcpcs, hcpcs_desc
         ORDER BY total_services DESC
     """
-    return pd.read_sql(query, conn)
+    return pd.read_sql(query, conn, params=params)
 
 
 # ============================================================================
@@ -117,22 +104,49 @@ def get_utilization_by_code(hcpcs_codes, year=2023):
 
 st.sidebar.header("Code Group Selection")
 
-selected_group = st.sidebar.selectbox(
-    "Select Code Group",
-    options=list(CODE_GROUPS.keys()),
-    index=0
+# Selection method
+selection_method = st.sidebar.radio(
+    "Selection Method",
+    options=["Radiology Groupings", "CPT Category", "Custom Codes"],
+    horizontal=True
 )
 
-selected_codes = CODE_GROUPS[selected_group]
-st.sidebar.caption(f"Codes: {', '.join(selected_codes)}")
+selected_codes = []
+selected_group = "Custom"
 
-# Custom codes option
-custom_codes = st.sidebar.text_input(
-    "Or enter custom codes (comma-separated)",
-    placeholder="70553, 70552, 70551"
-)
-if custom_codes:
-    selected_codes = [c.strip() for c in custom_codes.split(",") if c.strip()]
+if selection_method == "Radiology Groupings":
+    selected_group = st.sidebar.selectbox(
+        "Select Code Group",
+        options=list(CODE_GROUPS.keys()),
+        index=0
+    )
+    selected_codes = CODE_GROUPS[selected_group]
+    st.sidebar.caption(f"Codes: {', '.join(selected_codes)}")
+
+elif selection_method == "CPT Category":
+    selected_category = st.sidebar.selectbox(
+        "CPT Category",
+        options=[k for k in CPT_CATEGORY_RANGES.keys() if k != "All Codes"],
+        index=8  # Default to Radiology
+    )
+    selected_group = selected_category
+    cat_range = CPT_CATEGORY_RANGES.get(selected_category)
+    if cat_range:
+        st.sidebar.caption(f"Range: {cat_range[0]} - {cat_range[1]}")
+        try:
+            all_codes = get_code_list()
+            selected_codes = [c for c in all_codes if cat_range[0] <= c <= cat_range[1]][:20]
+            st.sidebar.caption(f"Using top 20 codes in range")
+        except:
+            selected_codes = []
+
+else:  # Custom Codes
+    custom_codes = st.sidebar.text_input(
+        "Enter codes (comma-separated)",
+        placeholder="70553, 70552, 70551"
+    )
+    if custom_codes:
+        selected_codes = [c.strip() for c in custom_codes.split(",") if c.strip()]
 
 st.sidebar.markdown("---")
 st.sidebar.header("Analysis Settings")
@@ -449,3 +463,7 @@ except Exception as e:
     st.error(f"Error loading data: {e}")
     st.info("Ensure the database is running and analytics views are created.")
     st.code(str(e))
+
+# Footer with data source footnote
+st.markdown("---")
+st.caption("Medicare utilization data: CMS Medicare Physician & Other Practitioners Public Use File (2023, National)")

@@ -1,7 +1,13 @@
 # Data files (large, downloaded from CMS)
 pfs_data/
 rvu25a/
+locality_data/
 *.zip
+
+# Hospital price transparency files (large)
+*standardcharges*.csv
+*Standard_Charges*.csv
+*Machine_Readable*.csv
 
 # Python
 __pycache__/
