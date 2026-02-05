@@ -681,6 +681,9 @@ def get_codes_analysis(hcpcs_codes, year, locality_id='AL-00', setting='nonfacil
 
     Returns dict with summary stats, individual code details, and insights.
     """
+    if not hcpcs_codes:
+        return None
+
     conn = get_connection()
 
     if setting not in ('nonfacility', 'facility'):
@@ -766,6 +769,9 @@ def get_utilization_data(hcpcs_codes, year=None):
 
     Returns DataFrame with services, beneficiaries, payments by code.
     """
+    if not hcpcs_codes:
+        return pd.DataFrame()
+
     conn = get_connection()
 
     placeholders = ','.join(['%s'] * len(hcpcs_codes))
@@ -800,6 +806,9 @@ def get_utilization_summary(hcpcs_codes, year):
 
     Returns dict with total services, beneficiaries, payments.
     """
+    if not hcpcs_codes:
+        return {'total_services': 0, 'total_beneficiaries': 0, 'total_medicare_payment': 0}
+
     conn = get_connection()
 
     placeholders = ','.join(['%s'] * len(hcpcs_codes))

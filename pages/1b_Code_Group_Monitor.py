@@ -30,6 +30,8 @@ st.caption("Analyze CPT groupings with utilization context and reimbursement com
 
 def get_code_group_decomposition(hcpcs_codes, year, locality_id='AL-00', setting='nonfacility'):
     """Get decomposition data for a group of HCPCS codes."""
+    if not hcpcs_codes:
+        return pd.DataFrame()
     conn = get_connection()
     # Validate setting to prevent SQL injection via column name
     if setting not in ('nonfacility', 'facility'):
@@ -76,6 +78,8 @@ def get_code_group_decomposition(hcpcs_codes, year, locality_id='AL-00', setting
 
 def get_utilization_by_code(hcpcs_codes, year=2023):
     """Get utilization data for each code in a list."""
+    if not hcpcs_codes:
+        return pd.DataFrame()
     conn = get_connection()
     placeholders = ','.join(['%s'] * len(hcpcs_codes))
     params = list(hcpcs_codes) + [year]
