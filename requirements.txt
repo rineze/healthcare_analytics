@@ -1,5 +1,7 @@
 streamlit
 pandas
 altair
+plotly
 psycopg2-binary
 python-dotenv
+requests
