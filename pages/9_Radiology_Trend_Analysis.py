@@ -287,7 +287,7 @@ try:
             x=alt.X('year:O', title='Year'),
             y=alt.Y('amount:Q', title='Average Allowed ($)', scale=alt.Scale(zero=False)),
             color=alt.Color('metric:N', title='Metric',
-                          scale=alt.Scale(range=[COLORS['neutral'], COLORS['primary']])),
+                          scale=alt.Scale(range=[COLORS['neutral'], COLORS['accent']])),
             strokeWidth=alt.value(3)
         ).properties(height=300)
 
@@ -345,7 +345,7 @@ try:
                 ).encode(
                     x=alt.X('year:O', title=None),
                     y=alt.Y('weighted_avg:Q', title='Wtd Avg ($)', scale=alt.Scale(zero=False)),
-                    color=alt.value(COLORS['primary'])
+                    color=alt.value(COLORS['accent'])
                 ).properties(height=150)
 
                 st.altair_chart(cat_chart, use_container_width=True)
