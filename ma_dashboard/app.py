@@ -141,24 +141,50 @@ st.sidebar.caption(
 st.title("MA Market Share Dashboard")
 
 # Clean FIPS for map
-map_display = map_data.dropna(subset=["fips"]).copy()
+if selected_plans:
+    # Show only counties where selected plan(s) operate
+    plan_map = (
+        org_data.groupby(["state", "county"])["enrollment"]
+        .sum()
+        .reset_index()
+    )
+    plan_map = plan_map.merge(
+        county_map_df[["state", "county", "fips", "penetration_rate"]],
+        on=["state", "county"],
+        how="inner",
+    )
+    map_display = plan_map[plan_map["enrollment"] > 0].dropna(subset=["fips"]).copy()
+else:
+    map_display = map_data.dropna(subset=["fips"]).copy()
+
 map_display = map_display[map_display["fips"].str.len() == 5]
 
 if not map_display.empty:
     counties_geojson = load_counties_geojson()
 
     # Build hover text
-    map_display["hover_text"] = (
-        map_display["county"] + ", " + map_display["state"]
-        + "<br>Enrollment: " + map_display["enrollment"].apply(lambda x: f"{x:,}")
-        + "<br>Penetration: " + map_display["penetration_rate"].apply(
-            lambda x: f"{x:.1f}%" if pd.notna(x) else "N/A"
+    if selected_plans:
+        plan_label_hover = selected_plans[0] if len(selected_plans) == 1 else "Selected Plans"
+        map_display["hover_text"] = (
+            map_display["county"] + ", " + map_display["state"]
+            + "<br>" + plan_label_hover + " Enrollment: "
+            + map_display["enrollment"].apply(lambda x: f"{x:,}")
+            + "<br>Penetration: " + map_display["penetration_rate"].apply(
+                lambda x: f"{x:.1f}%" if pd.notna(x) else "N/A"
+            )
         )
-        + "<br>Top Org: " + map_display["top_org"].fillna("N/A")
-        + " (" + map_display["top_org_share"].apply(
-            lambda x: f"{x:.1f}%" if pd.notna(x) else "N/A"
-        ) + ")"
-    )
+    else:
+        map_display["hover_text"] = (
+            map_display["county"] + ", " + map_display["state"]
+            + "<br>Enrollment: " + map_display["enrollment"].apply(lambda x: f"{x:,}")
+            + "<br>Penetration: " + map_display["penetration_rate"].apply(
+                lambda x: f"{x:.1f}%" if pd.notna(x) else "N/A"
+            )
+            + "<br>Top Org: " + map_display["top_org"].fillna("N/A")
+            + " (" + map_display["top_org_share"].apply(
+                lambda x: f"{x:.1f}%" if pd.notna(x) else "N/A"
+            ) + ")"
+        )
 
     fig_map = px.choropleth(
         map_display,
