@@ -84,6 +84,16 @@ enrollment_by_org, penetration = load_all_data(months[0])
 if plan_type != "All":
     enrollment_by_org = enrollment_by_org[enrollment_by_org["plan_category"] == plan_type]
 
+# Plan name filter (populated from loaded data)
+all_org_names = sorted(enrollment_by_org["org_name"].dropna().unique())
+selected_plans = st.sidebar.multiselect(
+    "Plan Name (optional)",
+    all_org_names,
+    placeholder="Search by plan name...",
+)
+if selected_plans:
+    enrollment_by_org = enrollment_by_org[enrollment_by_org["org_name"].isin(selected_plans)]
+
 # State multi-select
 all_states = sorted(county_map_df["state"].dropna().unique())
 selected_states = st.sidebar.multiselect(
@@ -274,14 +284,24 @@ col4.metric(
 st.caption(f"Geography: **{geo_label}** | Plan Type: **{plan_type}**")
 
 # --- Treemap ---
-st.subheader("Organization Market Share")
-
-treemap_data = (
-    org_data.groupby("org_name")["enrollment"]
-    .sum()
-    .reset_index()
-    .sort_values("enrollment", ascending=False)
-)
+if selected_plans:
+    plan_label = selected_plans[0] if len(selected_plans) == 1 else f"{len(selected_plans)} Plans"
+    st.subheader(f"Geographic Breakdown — {plan_label}")
+    treemap_data = (
+        org_data.groupby(["state", "county"])["enrollment"]
+        .sum()
+        .reset_index()
+        .sort_values("enrollment", ascending=False)
+    )
+    treemap_data["org_name"] = treemap_data["county"] + ", " + treemap_data["state"]
+else:
+    st.subheader("Organization Market Share")
+    treemap_data = (
+        org_data.groupby("org_name")["enrollment"]
+        .sum()
+        .reset_index()
+        .sort_values("enrollment", ascending=False)
+    )
 treemap_data = treemap_data[treemap_data["enrollment"] > 0]
 
 if not treemap_data.empty:
@@ -325,8 +345,9 @@ if not treemap_data.empty:
 
     # Build detail table
     detail = treemap_data.copy()
+    org_col_label = "County" if selected_plans else "Organization"
     detail = detail.rename(columns={
-        "org_name": "Organization",
+        "org_name": org_col_label,
         "enrollment": "MA Enrollment",
         "share_pct": "% of MA",
     })
@@ -343,7 +364,7 @@ if not treemap_data.empty:
     if total_eligible > 0:
         detail["% of Total Eligible"] = (detail["MA Enrollment"] / total_eligible * 100).round(2)
 
-    display_cols = ["Organization", "MA Enrollment", "% of MA"]
+    display_cols = [org_col_label, "MA Enrollment", "% of MA"]
     if "% of Total Eligible" in detail.columns:
         display_cols.append("% of Total Eligible")
 
