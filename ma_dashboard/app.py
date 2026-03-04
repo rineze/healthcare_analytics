@@ -18,6 +18,8 @@ from data_loader import (
     load_all_data,
     get_county_map_data,
     get_available_months,
+    get_markets,
+    get_market_counties,
     STATE_ABBREV,
 )
 
@@ -80,11 +82,11 @@ plan_type = st.sidebar.radio("Plan Type", ["All", "Individual", "Group"], index=
 county_map_df = get_county_map_data(months[0])
 enrollment_by_org, penetration = load_all_data(months[0])
 
-# Filter by plan type for enrollment_by_org
+# Filter by plan type
 if plan_type != "All":
     enrollment_by_org = enrollment_by_org[enrollment_by_org["plan_category"] == plan_type]
 
-# Plan name filter (populated from loaded data)
+# Plan name filter
 all_org_names = sorted(enrollment_by_org["org_name"].dropna().unique())
 selected_plans = st.sidebar.multiselect(
     "Plan Name (optional)",
@@ -94,40 +96,64 @@ selected_plans = st.sidebar.multiselect(
 if selected_plans:
     enrollment_by_org = enrollment_by_org[enrollment_by_org["org_name"].isin(selected_plans)]
 
-# State multi-select
-all_states = sorted(county_map_df["state"].dropna().unique())
-selected_states = st.sidebar.multiselect(
-    "States (leave empty for all US)",
-    all_states,
-)
-
-# Filter map data by states
-if selected_states:
-    map_data = county_map_df[county_map_df["state"].isin(selected_states)]
-    org_data = enrollment_by_org[enrollment_by_org["state"].isin(selected_states)]
-else:
-    map_data = county_map_df
-    org_data = enrollment_by_org
-
-# County multi-select (populated after state selection)
-available_counties = sorted(map_data["county"].dropna().unique())
-selected_counties = st.sidebar.multiselect(
-    "Counties (optional)",
-    available_counties,
-)
-
-# Track selected county for treemap focus
-if selected_counties:
-    org_data = org_data[org_data["county"].isin(selected_counties)]
-
-# Geography summary
 st.sidebar.markdown("---")
-if selected_counties:
-    geo_label = ", ".join(selected_counties)
-elif selected_states:
-    geo_label = ", ".join(selected_states)
+
+# ---------------------------------------------------------------------------
+# Market filter — when selected, replaces state/county selectors
+# ---------------------------------------------------------------------------
+markets_df = get_markets()
+market_labels = ["All Markets"] + [
+    f"{r['market_name']} ({r['market_state']})" for _, r in markets_df.iterrows()
+]
+market_keys_list = [None] + markets_df["market_key"].tolist()
+
+selected_market_idx = st.sidebar.selectbox(
+    "Market",
+    options=range(len(market_labels)),
+    format_func=lambda i: market_labels[i],
+    index=0,
+)
+selected_market_key = market_keys_list[selected_market_idx]
+
+if selected_market_key:
+    # Filter to market counties only
+    mkt_counties = get_market_counties(selected_market_key)
+    map_data = county_map_df.merge(mkt_counties, on=["state", "county"])
+    org_data = enrollment_by_org.merge(mkt_counties, on=["state", "county"])
+    geo_label = market_labels[selected_market_idx]
+    selected_states = []
+    selected_counties = []
 else:
-    geo_label = "All US"
+    # State multi-select
+    all_states = sorted(county_map_df["state"].dropna().unique())
+    selected_states = st.sidebar.multiselect(
+        "States (leave empty for all US)",
+        all_states,
+    )
+    if selected_states:
+        map_data = county_map_df[county_map_df["state"].isin(selected_states)]
+        org_data = enrollment_by_org[enrollment_by_org["state"].isin(selected_states)]
+    else:
+        map_data = county_map_df
+        org_data = enrollment_by_org
+
+    # County multi-select
+    available_counties = sorted(map_data["county"].dropna().unique())
+    selected_counties = st.sidebar.multiselect(
+        "Counties (optional)",
+        available_counties,
+    )
+    if selected_counties:
+        org_data = org_data[org_data["county"].isin(selected_counties)]
+
+    if selected_counties:
+        geo_label = ", ".join(selected_counties)
+    elif selected_states:
+        geo_label = ", ".join(selected_states)
+    else:
+        geo_label = "All US"
+
+st.sidebar.markdown("---")
 st.sidebar.markdown(f"**Selected:** {geo_label}")
 st.sidebar.caption(
     "Data source: CMS Medicare Advantage enrollment files. Updated monthly."
@@ -203,8 +229,8 @@ if not map_display.empty:
         marker_line_color="white",
     )
 
-    # Zoom to selected states if any
-    if selected_states:
+    # Zoom to market or selected states
+    if selected_market_key or selected_states:
         fig_map.update_geos(fitbounds="locations", visible=False)
     else:
         fig_map.update_geos(visible=False)
@@ -227,8 +253,8 @@ if not map_display.empty:
         key="county_map",
     )
 
-    # Handle map click -> update county selection
-    if event and event.selection and event.selection.points:
+    # Handle map click -> update county selection (disabled when market is selected)
+    if not selected_market_key and event and event.selection and event.selection.points:
         clicked_idx = event.selection.points[0].get("point_index")
         if clicked_idx is not None and clicked_idx < len(map_display):
             clicked_row = map_display.iloc[clicked_idx]

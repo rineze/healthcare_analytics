@@ -182,6 +182,28 @@ def load_all_data(report_month=None):
 
 
 @st.cache_data(ttl=3600)
+def get_markets():
+    """Get all available markets from the county_to_market reference table."""
+    conn = get_connection()
+    return pd.read_sql("""
+        SELECT DISTINCT market_name, market_key, market_state
+        FROM drinf.county_to_market
+        ORDER BY market_state, market_name
+    """, conn)
+
+
+@st.cache_data(ttl=3600)
+def get_market_counties(market_key):
+    """Get state+county list for a given market key."""
+    conn = get_connection()
+    return pd.read_sql("""
+        SELECT state, county
+        FROM drinf.county_to_market
+        WHERE market_key = %s
+    """, conn, params=[market_key])
+
+
+@st.cache_data(ttl=3600)
 def get_contract_detail(state, county, report_month=None):
     """Get contract-level detail for a specific county."""
     conn = get_connection()
