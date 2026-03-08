@@ -1,3 +1,4 @@
+import os
 """
 load_cbsa_markets.py
 
@@ -42,7 +43,7 @@ DB_SUPABASE = {
     "host": "aws-1-us-east-1.pooler.supabase.com", "port": 5432,
     "dbname": "postgres",
     "user": "postgres.numdlqsfydtypeurijae",
-    "password": "Pkoceo2024!",
+    "password": os.getenv("SUPABASE_PASSWORD", ""),
 }
 
 # States with hand-curated markets — skip in this loader

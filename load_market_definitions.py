@@ -16,15 +16,19 @@ Usage:
 To add a new state, append rows to MARKET_DATA and re-run.
 """
 
+import os
 import psycopg2
 from psycopg2.extras import execute_values
+from dotenv import load_dotenv
+from pathlib import Path
+load_dotenv(Path(__file__).parent.parent / ".env")
 
 DB_CONFIG = {
-    "host": "127.0.0.1",
-    "port": 5432,
-    "dbname": "postgres",
-    "user": "postgres",
-    "password": "lolsk8s",
+    "host":   os.getenv("LOCAL_HOST", "127.0.0.1"),
+    "port":   int(os.getenv("LOCAL_PORT", 5432)),
+    "dbname": os.getenv("LOCAL_DATABASE", "postgres"),
+    "user":   os.getenv("LOCAL_USER", "postgres"),
+    "password": os.getenv("LOCAL_PASSWORD", "lolsk8s"),
 }
 
 # ---------------------------------------------------------------------------

@@ -52,11 +52,11 @@ def get_db_config():
 
     # 4. Fallback to local development defaults
     return {
-        "host": "127.0.0.1",
-        "database": "postgres",
-        "user": "postgres",
-        "password": "lolsk8s",
-        "port": 5432,
+        "host":     os.getenv("LOCAL_HOST", "127.0.0.1"),
+        "database": os.getenv("LOCAL_DATABASE", "postgres"),
+        "user":     os.getenv("LOCAL_USER", "postgres"),
+        "password": os.getenv("LOCAL_PASSWORD", "lolsk8s"),
+        "port":     int(os.getenv("LOCAL_PORT", 5432)),
     }
 
 # Color palette (Stephen Few - muted, semantic consistency)

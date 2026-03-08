@@ -11,11 +11,16 @@ import os
 from datetime import datetime
 
 # Database connection
+from dotenv import load_dotenv
+from pathlib import Path
+load_dotenv(Path(__file__).parent.parent / ".env")
+
 DB_CONFIG = {
-    "host": "127.0.0.1",
-    "database": "postgres",
-    "user": "postgres",
-    "password": "lolsk8s"
+    "host":     os.getenv("LOCAL_HOST", "127.0.0.1"),
+    "port":     int(os.getenv("LOCAL_PORT", 5432)),
+    "database": os.getenv("LOCAL_DATABASE", "postgres"),
+    "user":     os.getenv("LOCAL_USER", "postgres"),
+    "password": os.getenv("LOCAL_PASSWORD", "lolsk8s"),
 }
 
 # Data directory
