@@ -8,9 +8,15 @@ import os
 from pathlib import Path
 from dotenv import load_dotenv
 
-# Load shared .env from parent directory (Informatics Tools & Files)
-_env_path = Path(__file__).resolve().parent.parent / ".env"
-load_dotenv(_env_path)
+from dotenv import load_dotenv
+from pathlib import Path
+# Search for .env walking up the directory tree
+for _env in [Path(__file__).parent / ".env",
+             Path(__file__).parent.parent / ".env",
+             Path(__file__).parent.parent.parent / ".env"]:
+    if _env.exists():
+        load_dotenv(_env)
+        break
 
 
 def get_db_config():

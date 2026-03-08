@@ -21,7 +21,13 @@ import psycopg2
 from psycopg2.extras import execute_values
 from dotenv import load_dotenv
 from pathlib import Path
-load_dotenv(Path(__file__).parent.parent / ".env")
+# Search for .env walking up the directory tree
+for _env in [Path(__file__).parent / ".env",
+             Path(__file__).parent.parent / ".env",
+             Path(__file__).parent.parent.parent / ".env"]:
+    if _env.exists():
+        load_dotenv(_env)
+        break
 
 DB_CONFIG = {
     "host":   os.getenv("LOCAL_HOST", "127.0.0.1"),

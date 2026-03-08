@@ -1,4 +1,12 @@
 import os
+from dotenv import load_dotenv
+from pathlib import Path
+for _env in [Path(__file__).parent / ".env",
+             Path(__file__).parent.parent / ".env",
+             Path(__file__).parent.parent.parent / ".env"]:
+    if _env.exists():
+        load_dotenv(_env)
+        break
 """
 load_cbsa_markets.py
 
