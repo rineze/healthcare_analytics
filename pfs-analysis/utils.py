@@ -20,20 +20,8 @@ for _env in [Path(__file__).parent / ".env",
 
 
 def get_db_config():
-    """Get database config with fallback chain: Streamlit secrets -> .env -> local."""
-    # 1. Try Streamlit secrets (for Streamlit Cloud deployment)
-    try:
-        return {
-            "host": st.secrets["database"]["host"],
-            "database": st.secrets["database"]["database"],
-            "user": st.secrets["database"]["user"],
-            "password": st.secrets["database"]["password"],
-            "port": st.secrets["database"]["port"],
-        }
-    except Exception:
-        pass
-
-    # 2. Check USE_LOCAL toggle in .env
+    """Get database config with fallback chain: USE_LOCAL -> Streamlit secrets -> .env -> local."""
+    # 1. Check USE_LOCAL toggle in .env (local dev takes priority)
     use_local = os.getenv("USE_LOCAL", "false").lower() == "true"
 
     if use_local and os.getenv("LOCAL_HOST"):
@@ -45,6 +33,18 @@ def get_db_config():
             "password": os.getenv("LOCAL_PASSWORD", "lolsk8s"),
             "port": int(os.getenv("LOCAL_PORT", 5432)),
         }
+
+    # 2. Try Streamlit secrets (for Streamlit Cloud deployment)
+    try:
+        return {
+            "host": st.secrets["database"]["host"],
+            "database": st.secrets["database"]["database"],
+            "user": st.secrets["database"]["user"],
+            "password": st.secrets["database"]["password"],
+            "port": st.secrets["database"]["port"],
+        }
+    except Exception:
+        pass
 
     # 3. Try Supabase environment variables
     if os.getenv("SUPABASE_HOST"):

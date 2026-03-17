@@ -30,7 +30,7 @@ DB_CONFIG = {
 }
 
 # Data directory
-DATA_DIR = r"C:\Users\danie\OneDrive\Desktop\Informatics Tools & Files\pfs_analysis\pfs_data"
+DATA_DIR = r"C:\dev\healthcare_analytics\pfs_data"
 
 # Column mapping from CSV headers to database columns
 COLUMN_MAP = {

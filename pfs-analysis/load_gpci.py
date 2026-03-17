@@ -28,7 +28,7 @@ DB_CONFIG = {
     "password": os.getenv("LOCAL_PASSWORD", "lolsk8s"),
 }
 
-DATA_DIR = r"C:\Users\danie\OneDrive\Desktop\Informatics Tools & Files\pfs_analysis\pfs_data"
+DATA_DIR = r"C:\dev\healthcare_analytics\pfs_data"
 
 # State abbreviation mapping for 2018 format (state embedded in locality name)
 STATE_FROM_MAC = {

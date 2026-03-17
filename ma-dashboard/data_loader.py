@@ -26,7 +26,17 @@ for _env in [Path(__file__).parent / ".env",
 
 
 def get_db_config():
-    """Get database config with fallback chain: Streamlit secrets -> .env -> local."""
+    """Get database config with fallback chain: USE_LOCAL -> Streamlit secrets -> .env -> local."""
+    use_local = os.getenv("USE_LOCAL", "false").lower() == "true"
+    if use_local and os.getenv("LOCAL_HOST"):
+        return {
+            "host": os.getenv("LOCAL_HOST", "127.0.0.1"),
+            "database": os.getenv("LOCAL_DATABASE", "postgres"),
+            "user": os.getenv("LOCAL_USER", "postgres"),
+            "password": os.getenv("LOCAL_PASSWORD", "lolsk8s"),
+            "port": int(os.getenv("LOCAL_PORT", 5432)),
+        }
+
     try:
         return {
             "host": st.secrets["database"]["host"],
@@ -37,16 +47,6 @@ def get_db_config():
         }
     except Exception:
         pass
-
-    use_local = os.getenv("USE_LOCAL", "false").lower() == "true"
-    if use_local and os.getenv("LOCAL_HOST"):
-        return {
-            "host": os.getenv("LOCAL_HOST", "127.0.0.1"),
-            "database": os.getenv("LOCAL_DATABASE", "postgres"),
-            "user": os.getenv("LOCAL_USER", "postgres"),
-            "password": os.getenv("LOCAL_PASSWORD", "lolsk8s"),
-            "port": int(os.getenv("LOCAL_PORT", 5432)),
-        }
 
     if os.getenv("SUPABASE_HOST"):
         return {

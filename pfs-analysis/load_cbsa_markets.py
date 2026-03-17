@@ -40,7 +40,7 @@ from psycopg2.extras import execute_values
 # Config
 # ---------------------------------------------------------------------------
 
-CBSA_FILE = r"C:\Users\danie\OneDrive\Desktop\Informatics Tools & Files\pfs_analysis\cbsa_delineation_2023.xlsx"
+CBSA_FILE = r"C:\dev\healthcare_analytics\pfs-analysis\cbsa_delineation_2023.xlsx"
 
 DB_LOCAL = {
     "host": "127.0.0.1", "port": 5432,
