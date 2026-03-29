@@ -6,6 +6,7 @@ Medicare Advantage, Medicaid Managed Care, and ACA/HIX.
 Data source: drinf.v_plan_master (~13,450 plans).
 Alias expansion: payor_aliases.csv bridges common abbreviations
 (BCBS, UHC, etc.) to CMS-registered names.
+Confirmed matches are saved to drinf.payor_lookups for instant recall.
 """
 
 import streamlit as st
@@ -14,7 +15,10 @@ import numpy as np
 from typing import Optional, List, Tuple
 from rapidfuzz import fuzz
 from pathlib import Path
-from data_loader import load_plan_master
+from data_loader import (
+    load_plan_master, find_saved_lookup, save_lookup,
+    load_saved_lookups, delete_lookup,
+)
 
 # Path to alias file in healthcare_data repo
 ALIAS_PATH = Path(__file__).parent.parent.parent / "healthcare_data" / "loaders" / "data" / "payor_aliases.csv"
@@ -94,7 +98,7 @@ def expand_aliases(query: str, aliases: pd.DataFrame) -> Tuple[str, List[str]]:
 
             if canonical:
                 remaining = remaining.replace(alias, canonical.lower())
-                matched.append(f'"{row["alias"]}" → {canonical}')
+                matched.append(f'"{row["alias"]}" \u2192 {canonical}')
 
     expanded_query = remaining if remaining != q_lower else query
     return expanded_query, matched
@@ -149,7 +153,7 @@ def score_matches(df: pd.DataFrame, query: str, aliases: pd.DataFrame,
 
 st.set_page_config(
     page_title="Government Plan Lookup",
-    page_icon="🔍",
+    page_icon="\U0001f50d",
     layout="wide",
 )
 
@@ -166,7 +170,7 @@ aliases = load_aliases()
 
 st.title("Government Plan Lookup")
 st.markdown(
-    "Enter a payor name — however it appears on a claim, denial, or roster — "
+    "Enter a payor name \u2014 however it appears on a claim, denial, or roster \u2014 "
     "and this tool will find the closest matching CMS-registered government plan."
 )
 
@@ -193,6 +197,21 @@ with col_opts:
     top_n = st.slider("Results to show", min_value=3, max_value=25, value=10)
 
 if query:
+    # --- Check for a saved/verified match first ---
+    saved = find_saved_lookup(query)
+    if saved is not None:
+        st.success(f'**Verified match** for "{query}"')
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Plan Name", saved["plan_name"])
+        c2.metric("Carrier", saved["carrier_name"] or "\u2014")
+        c3.metric("LOB / State", f"{saved['lob']} \u2014 {saved['state'] or 'National'}")
+        c4.metric("Confirmed Score", f"{saved['match_score']}%")
+        if saved.get("notes"):
+            st.caption(f"Note: {saved['notes']}")
+        st.markdown("---")
+        st.caption("Fuzzy results shown below for comparison \u2014 confirm a different match to update.")
+
+    # --- Fuzzy matching ---
     results, expanded_query, alias_matches = score_matches(df, query, aliases, state_filter, top_n)
 
     # Show alias expansion if it happened
@@ -203,33 +222,28 @@ if query:
             if expanded_query.lower() != query.lower():
                 st.caption(f'Searching for: **{expanded_query}**')
 
-    display_cols = {
-        "Match Score": "Match %",
-        "plan_name": "Plan Name",
-        "carrier_name": "Carrier / Parent Org",
-        "lob": "LOB",
-        "state": "State",
-        "plan_type": "Plan Type",
-        "plan_sub_type": "Sub Type",
-        "benefit_category": "Benefit Category",
-        "metal_level": "Metal Level",
-        "plan_year": "Year",
-    }
-    display = results[list(display_cols.keys())].rename(columns=display_cols)
-    display["Match %"] = display["Match %"].round(1)
+    st.markdown(f"### Top {len(results)} matches")
 
-    st.markdown(f"### Top {len(display)} matches")
+    # Render each result row with a confirm button
+    # Header row
+    hdr = st.columns([1, 3, 3, 1, 1, 1])
+    hdr[0].markdown("**Score**")
+    hdr[1].markdown("**Plan Name**")
+    hdr[2].markdown("**Carrier**")
+    hdr[3].markdown("**LOB**")
+    hdr[4].markdown("**State**")
+    hdr[5].markdown("")
 
-    st.dataframe(
-        display,
-        use_container_width=True,
-        hide_index=True,
-        column_config={
-            "Match %": st.column_config.ProgressColumn(
-                min_value=0, max_value=100, format="%.1f%%",
-            ),
-        },
-    )
+    for idx, (_, row) in enumerate(results.iterrows()):
+        cols = st.columns([1, 3, 3, 1, 1, 1])
+        cols[0].write(f"{row['Match Score']:.1f}%")
+        cols[1].write(row["plan_name"] or "")
+        cols[2].write(row["carrier_name"] or "")
+        cols[3].write(row["lob"] or "")
+        cols[4].write(row["state"] or "\u2014")
+        if cols[5].button("Confirm", key=f"confirm_{idx}"):
+            save_lookup(query, row, row["Match Score"])
+            st.rerun()
 
     # Best match summary
     top_match = results.iloc[0]
@@ -257,3 +271,24 @@ else:
         "CMS HIX PUF (2025). Total: {:,} plans.".format(len(df))
     )
     st.caption(f"Alias table: {len(aliases)} entries loaded from payor_aliases.csv")
+
+# ---------------------------------------------------------------------------
+# Saved lookups viewer
+# ---------------------------------------------------------------------------
+
+st.markdown("---")
+with st.expander("Saved Lookups"):
+    saved_df = load_saved_lookups()
+    if saved_df.empty:
+        st.info("No confirmed matches yet. Search for a payor and click Confirm to save a mapping.")
+    else:
+        st.caption(f"{len(saved_df)} saved mappings")
+        for _, srow in saved_df.iterrows():
+            cols = st.columns([3, 3, 1, 1, 1])
+            cols[0].write(f"**{srow['lookup_value']}**")
+            cols[1].write(f"{srow['plan_name']} ({srow['lob']})")
+            cols[2].write(srow["state"] or "\u2014")
+            cols[3].write(f"{srow['match_score']}%")
+            if cols[4].button("Delete", key=f"del_{srow['id']}"):
+                delete_lookup(srow["id"])
+                st.rerun()
