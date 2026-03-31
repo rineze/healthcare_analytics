@@ -264,22 +264,24 @@ with tab_single:
 
         # Render each result row with a confirm button
         # Header row
-        hdr = st.columns([1, 3, 3, 1, 1, 1])
+        hdr = st.columns([1, 3, 2, 1, 1, 1, 1])
         hdr[0].markdown("**Score**")
         hdr[1].markdown("**Plan Name**")
         hdr[2].markdown("**Carrier**")
         hdr[3].markdown("**LOB**")
         hdr[4].markdown("**State**")
-        hdr[5].markdown("")
+        hdr[5].markdown("**Members**")
+        hdr[6].markdown("")
 
         for idx, (_, row) in enumerate(results.iterrows()):
-            cols = st.columns([1, 3, 3, 1, 1, 1])
+            cols = st.columns([1, 3, 2, 1, 1, 1, 1])
             cols[0].write(f"{row['Match Score']:.1f}%")
             cols[1].write(row["plan_name"] or "")
             cols[2].write(row["carrier_name"] or "")
             cols[3].write(row["lob"] or "")
             cols[4].write(row["state"] or "\u2014")
-            if cols[5].button("Confirm", key=f"confirm_{idx}"):
+            cols[5].write(f"{row['membership']:,.0f}" if pd.notna(row["membership"]) else "\u2014")
+            if cols[6].button("Confirm", key=f"confirm_{idx}"):
                 save_lookup(query, row, row["Match Score"])
                 st.rerun()
 
@@ -374,6 +376,7 @@ with tab_bulk:
                         "Carrier": top["carrier_name"] or "",
                         "LOB": top["lob"] or "",
                         "State": top["state"] or "",
+                        "Members": f"{top['membership']:,.0f}" if pd.notna(top["membership"]) else "",
                         "Match Score": f"{top['Match Score']:.1f}%",
                     })
                     progress.progress((i + 1) / len(rows_parsed))

@@ -79,13 +79,33 @@ def load_plan_master():
                    WHEN v.lob = 'MA' THEN d.parent_organization
                    WHEN v.lob = 'Medicaid' THEN v.carrier_name
                    ELSE NULL
-               END AS parent_organization
+               END AS parent_organization,
+               CASE
+                   WHEN v.lob = 'MA' THEN ma_enroll.enrollment
+                   WHEN v.lob = 'Medicaid' THEN med.total_enrollment
+                   ELSE NULL
+               END AS membership
         FROM drinf.v_plan_master v
         LEFT JOIN drinf.ma_plan_directory d
             ON v.lob = 'MA' AND v.carrier_id = d.contract_id
+        LEFT JOIN (
+            SELECT contract_id, LPAD(plan_id, 3, '0') AS pbp_id, SUM(enrollment) AS enrollment
+            FROM drinf.ma_cpsc_enrollment
+            WHERE report_month = (SELECT MAX(report_month) FROM drinf.ma_cpsc_enrollment)
+            GROUP BY contract_id, LPAD(plan_id, 3, '0')
+        ) ma_enroll
+            ON v.lob = 'MA'
+            AND v.carrier_id = ma_enroll.contract_id
+            AND LPAD(SPLIT_PART(v.plan_id, '-', 2), 3, '0') = ma_enroll.pbp_id
+        LEFT JOIN drinf.ref_medicaid_landscape med
+            ON v.lob = 'Medicaid'
+            AND v.state = med.state
+            AND v.plan_name = med.plan_name
+            AND v.plan_year = med.plan_year
         ORDER BY v.lob, v.state, v.plan_name
     """, conn)
     df["parent_organization"] = df["parent_organization"].fillna("")
+    df["membership"] = pd.to_numeric(df["membership"], errors="coerce")
     return df
 
 
