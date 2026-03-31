@@ -29,7 +29,7 @@ def get_db_config():
             "host": os.getenv("LOCAL_HOST", "127.0.0.1"),
             "database": os.getenv("LOCAL_DATABASE", "postgres"),
             "user": os.getenv("LOCAL_USER", "postgres"),
-            "password": os.getenv("LOCAL_PASSWORD", "lolsk8s"),
+            "password": os.getenv("LOCAL_PASSWORD", ""),
             "port": int(os.getenv("LOCAL_PORT", 5432)),
         }
 
@@ -57,7 +57,7 @@ def get_db_config():
         "host": os.getenv("LOCAL_HOST", "127.0.0.1"),
         "database": os.getenv("LOCAL_DATABASE", "postgres"),
         "user": os.getenv("LOCAL_USER", "postgres"),
-        "password": os.getenv("LOCAL_PASSWORD", "lolsk8s"),
+        "password": os.getenv("LOCAL_PASSWORD", ""),
         "port": int(os.getenv("LOCAL_PORT", 5432)),
     }
 
@@ -72,12 +72,20 @@ def load_plan_master():
     """Load the full v_plan_master view."""
     conn = _get_conn()
     df = pd.read_sql("""
-        SELECT lob, plan_id, carrier_id, plan_year,
-               carrier_name, plan_name, plan_type, plan_sub_type,
-               metal_level, benefit_category, state
-        FROM drinf.v_plan_master
-        ORDER BY lob, state, plan_name
+        SELECT v.lob, v.plan_id, v.carrier_id, v.plan_year,
+               v.carrier_name, v.plan_name, v.plan_type, v.plan_sub_type,
+               v.metal_level, v.benefit_category, v.state,
+               CASE
+                   WHEN v.lob = 'MA' THEN d.parent_organization
+                   WHEN v.lob = 'Medicaid' THEN v.carrier_name
+                   ELSE NULL
+               END AS parent_organization
+        FROM drinf.v_plan_master v
+        LEFT JOIN drinf.ma_plan_directory d
+            ON v.lob = 'MA' AND v.carrier_id = d.contract_id
+        ORDER BY v.lob, v.state, v.plan_name
     """, conn)
+    df["parent_organization"] = df["parent_organization"].fillna("")
     return df
 
 
