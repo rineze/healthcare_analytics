@@ -44,7 +44,7 @@ CBSA_FILE = r"C:\dev\healthcare_analytics\pfs-analysis\cbsa_delineation_2023.xls
 
 DB_LOCAL = {
     "host": "127.0.0.1", "port": 5432,
-    "dbname": "postgres", "user": "postgres", "password": "lolsk8s",
+    "dbname": "postgres", "user": "postgres", "password": os.getenv("LOCAL_PASSWORD", ""),
 }
 
 DB_SUPABASE = {

@@ -26,7 +26,7 @@ DB_CONFIG = {
     "port":     int(os.getenv("LOCAL_PORT", 5432)),
     "database": os.getenv("LOCAL_DATABASE", "postgres"),
     "user":     os.getenv("LOCAL_USER", "postgres"),
-    "password": os.getenv("LOCAL_PASSWORD", "lolsk8s"),
+    "password": os.getenv("LOCAL_PASSWORD", ""),
 }
 
 # Data directory
