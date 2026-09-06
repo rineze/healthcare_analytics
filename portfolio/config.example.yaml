@@ -1,0 +1,69 @@
+# Copy this to config.yaml and fill in your own accounts.
+# config.yaml is gitignored. This example file is not.
+#
+# The most important field in here is tax_type. No broker export tells you
+# whether an account is taxable, a Roth, or a 401k, and the tax agent cannot
+# do anything useful without it. Fill it in once and forget about it.
+
+accounts:
+  # account_id is a slug you choose. It never changes, so keep it short and
+  # obvious. It is what shows up in every report.
+  - account_id: fid-brokerage
+    platform: fidelity          # fidelity | empower | robinhood
+    label: "Fidelity Individual"
+    tax_type: taxable           # taxable | traditional_ira | roth_ira | 401k | hsa | 529
+    mask4: "1234"               # LAST FOUR DIGITS ONLY. Never the full number.
+
+  - account_id: fid-roth
+    platform: fidelity
+    label: "Fidelity Roth IRA"
+    tax_type: roth_ira
+    mask4: "5678"
+
+  - account_id: rh-individual
+    platform: robinhood
+    label: "Robinhood"
+    tax_type: taxable
+    mask4: "9012"
+
+  # Accounts you only see through Empower (an old 401k, an HSA) go here too.
+  # Anything Empower reports that is ALSO exported directly from the broker gets
+  # deduped automatically, with the broker's own numbers winning.
+  - account_id: emp-401k
+    platform: empower
+    label: "Rad Partners 401k"
+    tax_type: 401k
+    mask4: "3456"
+
+
+# Optional. Drives the allocation drift section. Must sum to 1.0.
+# Delete this block entirely if you would rather not set targets, and drift
+# reporting will be skipped instead of comparing against numbers you never chose.
+targets:
+  us_equity: 0.65
+  intl_equity: 0.15
+  bond: 0.15
+  cash: 0.05
+
+
+# Optional. enrich.py guesses asset class from the fund name and yfinance
+# metadata, which works for obvious cases and misses judgment calls. Pin
+# anything it gets wrong here.
+asset_class_overrides:
+  # SPAXX: cash
+  # VXUS: intl_equity
+  # BND: bond
+
+
+thresholds:
+  # Flag any single position above this share of the portfolio.
+  concentration_warn_pct: 0.10
+
+  # Minimum unrealized loss worth a tax-loss harvesting look. Agent 3.
+  tlh_min_loss_usd: 500
+
+  # Warn about short-term lots crossing into long-term treatment within N days.
+  long_term_watch_days: 60
+
+  # Surface earnings dates landing within N days.
+  earnings_watch_days: 30

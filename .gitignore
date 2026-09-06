@@ -24,6 +24,15 @@ data/
 .vscode/
 .idea/
 
+# Portfolio (personal financial data — never commit)
+# Raw broker exports and generated reports. config.yaml carries account masks
+# and target allocation; config.example.yaml is the committed template.
+portfolio/inbox/*
+!portfolio/inbox/.gitkeep
+portfolio/reports/*
+!portfolio/reports/.gitkeep
+portfolio/config.yaml
+
 # Misc
 tmpclaude-*
 *.tmp
