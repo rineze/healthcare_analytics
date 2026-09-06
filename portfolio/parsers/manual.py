@@ -16,8 +16,13 @@ Rules:
   - account_id must match config.yaml exactly. Unlike the broker parsers there is
     no account-number matching to fall back on, so a typo is a hard error rather
     than a silent drop.
-  - Give quantity OR market_value. Both is better. If only quantity is present,
-    enrich.py computes value from the latest close.
+  - **Give a share count.** It is the field that matters. Market value is a
+    price times a quantity and the price changes daily, so a recorded market
+    value is frozen at the moment it was typed. A position with a share count
+    gets repriced on every run; a position with only a dollar amount cannot be
+    repriced at all, ever, because there is nothing to multiply.
+    A market value is still accepted, as a fallback for anything whose share
+    count is genuinely unavailable, and for reconciliation.
   - ONE ROW PER TAX LOT. Repeat the same account_id and symbol for each lot with
     its own acquired_date, quantity and cost_basis. The rows are summed into a
     single position and each becomes its own lot, which is what a broker's

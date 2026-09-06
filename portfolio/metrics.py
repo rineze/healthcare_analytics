@@ -86,21 +86,111 @@ def snapshot_dates(limit: int = 2) -> list[date]:
 
 
 def holdings_frame(as_of: date) -> pd.DataFrame:
-    """Positions on a given date, joined to security reference data."""
+    """Positions on a given date, valued at the latest price wherever possible.
+
+    Cost basis is a historical fact and is stored. Market value is not: it is a
+    price times a share count, and the price changes every trading day. Storing a
+    market value freezes it at whatever it was when someone typed it in.
+
+    So market value is COMPUTED here whenever a share count and a price both
+    exist, and only falls back to the recorded figure when one of them is
+    missing. `valuation_method` says which happened for every row, and the
+    recorded figure is kept alongside so the two can be compared.
+
+    A repriced position is current as of its price date no matter how long ago
+    the share count was recorded, because share counts change far more slowly
+    than prices. That is why value_as_of follows the price when one is available.
+    """
     return db.query(
         f"""
+        WITH latest AS (
+            SELECT DISTINCT ON (symbol) symbol, close, price_date
+            FROM {SCHEMA}.prices
+            ORDER BY symbol, price_date DESC
+        )
         SELECT h.account_id, a.tax_type, a.platform, a.account_label,
                h.symbol, s.name, s.security_type, s.sector, s.industry,
                s.asset_class, s.enrich_status,
-               h.quantity, h.price, h.market_value,
-               h.cost_basis_total, h.unrealized_gl, h.source, h.value_as_of
+               h.quantity,
+               COALESCE(latest.close, h.price) AS price,
+               CASE WHEN h.quantity IS NOT NULL AND latest.close IS NOT NULL
+                    THEN round(h.quantity * latest.close, 2)
+                    ELSE h.market_value END AS market_value,
+               h.cost_basis_total,
+               CASE WHEN h.quantity IS NOT NULL AND latest.close IS NOT NULL
+                         AND h.cost_basis_total IS NOT NULL
+                    THEN round(h.quantity * latest.close - h.cost_basis_total, 2)
+                    ELSE h.unrealized_gl END AS unrealized_gl,
+               h.source,
+               CASE WHEN h.quantity IS NOT NULL AND latest.close IS NOT NULL
+                    THEN latest.price_date ELSE h.value_as_of END AS value_as_of,
+               CASE WHEN h.quantity IS NOT NULL AND latest.close IS NOT NULL
+                    THEN 'live_price' ELSE 'recorded' END AS valuation_method,
+               h.market_value AS recorded_market_value,
+               latest.price_date AS price_as_of
         FROM {SCHEMA}.holdings h
         JOIN {SCHEMA}.accounts a ON a.account_id = h.account_id
         LEFT JOIN {SCHEMA}.securities s ON s.symbol = h.symbol
+        LEFT JOIN latest ON latest.symbol = h.symbol
         WHERE h.as_of_date = %s
         """,
         (as_of,),
     )
+
+
+def valuation_coverage(h: pd.DataFrame) -> dict:
+    """How much of the book carries a live price versus a frozen figure.
+
+    A position recorded as a dollar amount with no share count can never be
+    repriced: there is nothing to multiply. It is frozen at whatever it was worth
+    when it was written down, and no amount of price refreshing will move it.
+    That is a data problem to fix at the source, not a limitation to work around,
+    so it is reported prominently enough to act on.
+    """
+    if h.empty or "valuation_method" not in h.columns:
+        return {"available": False}
+
+    total = float(h["market_value"].astype(float).sum())
+    live = h[h["valuation_method"] == "live_price"]
+    frozen = h[h["valuation_method"] == "recorded"]
+    live_mv = float(live["market_value"].astype(float).sum())
+
+    unpriceable = frozen[frozen["quantity"].isna()]
+    stale_priced = frozen[frozen["quantity"].notna()]
+
+    # Where both a live price and a recorded figure exist, disagreement is a
+    # signal: either the recorded value went stale or the share count is wrong.
+    drift = []
+    for _, r in live.iterrows():
+        rec = _f(r["recorded_market_value"])
+        now = _f(r["market_value"])
+        if rec and now and abs(now - rec) / rec > 0.02:
+            drift.append({
+                "symbol": r["symbol"], "account_id": r["account_id"],
+                "recorded": round(rec, 2), "repriced": round(now, 2),
+                "change_pct": round((now - rec) / rec, 4),
+            })
+
+    return {
+        "available": True,
+        "live_priced_market_value": round(live_mv, 2),
+        "live_priced_share": round(live_mv / total, 4) if total else None,
+        "positions_live_priced": int(len(live)),
+        "positions_frozen": int(len(frozen)),
+        "frozen_market_value": round(float(frozen["market_value"].astype(float).sum()), 2),
+        "no_share_count": [
+            {"account_id": r["account_id"], "symbol": r["symbol"],
+             "market_value": _f(r["market_value"])}
+            for _, r in unpriceable.iterrows()
+        ],
+        "no_price_available": sorted(stale_priced["symbol"].unique().tolist()),
+        "repricing_drift": sorted(drift, key=lambda d: -abs(d["change_pct"])),
+        "note": (
+            "Positions recorded as a dollar amount with no share count cannot be "
+            "repriced and are frozen at the value that was written down. Adding a "
+            "share count for them makes them live."
+        ) if len(unpriceable) else None,
+    }
 
 
 def lots_frame(as_of: date) -> pd.DataFrame:
@@ -748,6 +838,7 @@ def build(agent: str = "investment-analyst") -> dict:
         "data_quality": {
             **data_quality(h, lots, cfg),
             "staleness": staleness(h, current, th["stale_after_days"]),
+            "valuation": valuation_coverage(h),
         },
         "thresholds": th,
     }
@@ -817,6 +908,17 @@ def print_summary(p: dict) -> None:
         print(f"\n  Stale values    ${st['stale_market_value']:,.0f} "
               f"({st['stale_pct_of_portfolio']:.0%}) back to {st['oldest_value_as_of']} "
               f"in {', '.join(st['stale_accounts'])}")
+
+    vc = p["data_quality"].get("valuation") or {}
+    if vc.get("available"):
+        print(f"\n  Valuation      {vc['live_priced_share']:.0%} of value carries a live price "
+              f"({vc['positions_live_priced']} positions)")
+        if vc["no_share_count"]:
+            frozen = sum(x["market_value"] or 0 for x in vc["no_share_count"])
+            print(f"                  ${frozen:,.0f} frozen: no share count, cannot reprice")
+            for x in vc["no_share_count"][:5]:
+                print(f"                    {x['account_id']:<18}{x['symbol']:<8}"
+                      f"${(x['market_value'] or 0):>11,.2f}")
 
     dq = p["data_quality"]
     gaps = []

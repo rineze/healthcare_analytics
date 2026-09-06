@@ -501,21 +501,19 @@ def asset_location_review(as_of: date, cfg: dict) -> dict:
     taxable account and best in a Roth. The cost of getting it backwards is
     recurring and quantifiable.
     """
-    h = db.query(
-        f"""
-        SELECT h.account_id, a.tax_type, h.symbol, h.market_value,
-               s.asset_class, s.security_type,
-               (SELECT f.div_yield FROM {SCHEMA}.fundamentals f
-                WHERE f.symbol = h.symbol ORDER BY f.as_of_date DESC LIMIT 1) AS div_yield
-        FROM {SCHEMA}.holdings h
-        JOIN {SCHEMA}.accounts a ON a.account_id = h.account_id
-        LEFT JOIN {SCHEMA}.securities s ON s.symbol = h.symbol
-        WHERE h.as_of_date = %s
-        """,
-        (as_of,),
-    )
+    # Use the shared frame so market values here are repriced identically to
+    # everywhere else. A tax module quoting a different value for the same
+    # position than the portfolio report does is its own kind of wrong.
+    import metrics
+    h = metrics.holdings_frame(as_of)
     if h.empty:
         return {"available": False, "reason": f"no holdings on {as_of}"}
+
+    yields = db.query(
+        f"""SELECT DISTINCT ON (symbol) symbol, div_yield FROM {SCHEMA}.fundamentals
+            WHERE div_yield IS NOT NULL ORDER BY symbol, as_of_date DESC"""
+    ).set_index("symbol")["div_yield"].to_dict() if True else {}
+    h = h.assign(div_yield=h["symbol"].map(yields))
 
     # Asset classes whose income is generally ordinary rather than qualified.
     ORDINARY = {"bond", "cash"}

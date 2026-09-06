@@ -23,6 +23,12 @@ period, a weight, or a wash-sale window. The metrics modules produce every numbe
 and agents narrate what it means. Every figure in every report traces back to a
 function and a SQL query you can run by hand.
 
+**Store facts, compute the rest.** Cost basis, share count, acquisition date and
+account type are facts: they are recorded once and stay true. Market value is not
+a fact, it is a calculation whose inputs move daily, so it is computed from share
+count times the latest price on every run rather than stored. `data_quality.valuation`
+reports how much of the book carries a live price and names anything frozen.
+
 **Agent files carry expertise, not findings.** The test applied to every line: *if
 a position were sold tomorrow, would this sentence become wrong?* If yes it
 belongs in the database. No agent file contains a ticker, a dollar figure, an
@@ -158,8 +164,13 @@ fid-brokerage,,,,85612,,,2026-09-04,ACCOUNT TOTAL
 
 - `account_id` must match `config.yaml` exactly. There is no account-number
   fallback for a hand-written file, so a typo is a hard error, not a silent drop.
-- Give quantity **or** market_value. Both is better. Quantity alone gets priced
-  by `enrich.py` from the latest close.
+- **Share count is the field that matters.** Cost basis is a historical fact and
+  is stored. Market value is not: it is a price times a quantity, and the price
+  moves every day. A position with a share count is repriced from the latest
+  close on every run. A position recorded as a dollar amount with no share count
+  is **frozen forever** at whatever it was worth when it was written down, and no
+  amount of refreshing will move it. Record market value only as a fallback where
+  a share count is genuinely unavailable, or for reconciliation.
 - `value_as_of` is when the number was actually true. Leave it blank for the
   snapshot date. Fill it in when an account has not been refreshed, and the
   report will say how much of the book is stale instead of pretending it is
