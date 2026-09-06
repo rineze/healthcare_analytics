@@ -3,7 +3,7 @@ name: DB Observer
 # The scheduled freshness check. Runs whether or not anyone has a Claude
 # session open, and messages Telegram when a dataset goes stale.
 #
-# Setup (one time, see docs/OBSERVER_SETUP.md):
+# Setup (one time, see docs/TELEGRAM_AGENTS.md):
 #   1. sql/migrations/004_observer_role.sql, then set the role's password
 #   2. Create a Telegram bot with @BotFather, get the token and your chat id
 #   3. Add four repository secrets under Settings > Secrets and variables >
