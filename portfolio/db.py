@@ -119,7 +119,16 @@ def upsert(table: str, rows: list[dict], conflict_cols: list[str]) -> int:
     if not rows:
         return 0
 
-    cols = list(rows[0].keys())
+    # Union of keys, not rows[0].keys(). Different parsers populate different
+    # optional fields, so a batch can be non-uniform. Keying off the first row
+    # would silently drop any column that row happens not to carry.
+    cols, seen = [], set()
+    for row in rows:
+        for c in row:
+            if c not in seen:
+                seen.add(c)
+                cols.append(c)
+
     update_cols = [c for c in cols if c not in conflict_cols]
 
     col_list = ", ".join(f'"{c}"' for c in cols)
@@ -168,9 +177,14 @@ CREATE TABLE IF NOT EXISTS {SCHEMA}.accounts (
     mask4           text,
     updated_at      timestamptz NOT NULL DEFAULT now(),
     CONSTRAINT accounts_platform_chk
-        CHECK (platform IN ('fidelity', 'empower', 'robinhood')),
+        CHECK (platform IN ('fidelity', 'empower', 'robinhood', 'manual')),
+    -- roth_401k is separate from 401k on purpose. A 401k plan can hold both Roth
+    -- and pre-tax money, and which is which is the single most consequential
+    -- fact about the balance: Roth is never taxed again, pre-tax is ordinary
+    -- income on withdrawal. Collapsing them throws that away.
     CONSTRAINT accounts_tax_type_chk
-        CHECK (tax_type IN ('taxable', 'traditional_ira', 'roth_ira', '401k', 'hsa', '529'))
+        CHECK (tax_type IN ('taxable', 'traditional_ira', 'roth_ira',
+                            '401k', 'roth_401k', 'hsa', '529'))
 );
 
 CREATE TABLE IF NOT EXISTS {SCHEMA}.securities (
@@ -195,8 +209,13 @@ CREATE TABLE IF NOT EXISTS {SCHEMA}.holdings (
     market_value        numeric(20, 2),
     cost_basis_total    numeric(20, 2),
     unrealized_gl       numeric(20, 2),
-    source              text,   -- 'broker' or 'aggregator', drives dedupe precedence
+    source              text,   -- 'broker', 'aggregator' or 'manual', drives dedupe precedence
     source_file         text,
+    -- as_of_date is the snapshot this row belongs to. value_as_of is when the
+    -- number was actually observed. They differ whenever an account was not
+    -- refreshed for a snapshot, and without the distinction the database would
+    -- assert something untrue about real money.
+    value_as_of         date,
     loaded_at           timestamptz NOT NULL DEFAULT now(),
     PRIMARY KEY (as_of_date, account_id, symbol)
 );
@@ -216,6 +235,7 @@ CREATE TABLE IF NOT EXISTS {SCHEMA}.lots (
     unrealized_gl   numeric(20, 2),
     term            text,   -- short | long | unknown, derived from acquired_date not parsed
     source_file     text,
+    value_as_of     date,
     loaded_at       timestamptz NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS lots_symbol_idx ON {SCHEMA}.lots (symbol, as_of_date);
@@ -276,11 +296,35 @@ CREATE INDEX IF NOT EXISTS report_runs_agent_idx ON {SCHEMA}.report_runs (agent,
 """
 
 
+# SCHEMA_DDL uses CREATE TABLE IF NOT EXISTS, which silently does nothing on a
+# database that already has the table. Anything added after the first release has
+# to arrive as an explicit ALTER or existing installs never get it. Every
+# statement here is idempotent and safe to re-run.
+MIGRATIONS_DDL = f"""
+ALTER TABLE {SCHEMA}.holdings ADD COLUMN IF NOT EXISTS value_as_of date;
+UPDATE {SCHEMA}.holdings SET value_as_of = as_of_date WHERE value_as_of IS NULL;
+
+ALTER TABLE {SCHEMA}.lots ADD COLUMN IF NOT EXISTS value_as_of date;
+UPDATE {SCHEMA}.lots SET value_as_of = as_of_date WHERE value_as_of IS NULL;
+
+-- CHECK constraints cannot be altered in place, so drop and recreate.
+ALTER TABLE {SCHEMA}.accounts DROP CONSTRAINT IF EXISTS accounts_platform_chk;
+ALTER TABLE {SCHEMA}.accounts ADD CONSTRAINT accounts_platform_chk
+    CHECK (platform IN ('fidelity', 'empower', 'robinhood', 'manual'));
+
+ALTER TABLE {SCHEMA}.accounts DROP CONSTRAINT IF EXISTS accounts_tax_type_chk;
+ALTER TABLE {SCHEMA}.accounts ADD CONSTRAINT accounts_tax_type_chk
+    CHECK (tax_type IN ('taxable', 'traditional_ira', 'roth_ira',
+                        '401k', 'roth_401k', 'hsa', '529'));
+"""
+
+
 def init_schema() -> None:
-    """Create the schema and all tables. Safe to run repeatedly."""
+    """Create the schema, all tables, and apply migrations. Safe to re-run."""
     with get_conn() as conn:
         with conn.cursor() as cur:
             cur.execute(SCHEMA_DDL)
+            cur.execute(MIGRATIONS_DDL)
 
 
 def latest_as_of_date() -> str | None:

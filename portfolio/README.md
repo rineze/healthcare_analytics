@@ -130,6 +130,35 @@ not export directly.
 Its weakness is cost basis, which aggregated views usually lack. Treat it as the
 completeness check, not the tax agent's source of truth.
 
+### Manual entry (Empower, and anything you cannot export)
+
+Not every account can be exported. Empower's own download carries no usable cost
+basis, and an old account may never be exported at all. For those, maintain a CSV
+in `inbox/`:
+
+```
+account_id,symbol,quantity,price,market_value,cost_basis,acquired_date,value_as_of,note
+fid-brokerage,AMZN,20,,5170,1940,2023-02-10,2026-09-04,$97/sh
+emp-401k-roth,FID500IDX,,,70167,,,2026-09-05,basis tax-irrelevant in a Roth
+rh-individual,BTC,0.0492138,,,,,2026-06-30,priced at enrichment
+fid-brokerage,,,,85612,,,2026-09-04,ACCOUNT TOTAL
+```
+
+- `account_id` must match `config.yaml` exactly. There is no account-number
+  fallback for a hand-written file, so a typo is a hard error, not a silent drop.
+- Give quantity **or** market_value. Both is better. Quantity alone gets priced
+  by `enrich.py` from the latest close.
+- `value_as_of` is when the number was actually true. Leave it blank for the
+  snapshot date. Fill it in when an account has not been refreshed, and the
+  report will say how much of the book is stale instead of pretending it is
+  current.
+- A row with a **blank symbol** and a market value is an account total. It runs
+  through the same reconciliation gate as a broker export, so a hand-typed file
+  still has to add up before anything is written.
+
+**You do not need cost basis in a Roth IRA or a 401k.** Gains there are never
+taxed, so basis is permanently irrelevant. Only taxable accounts need it.
+
 ### Then
 
 ```
@@ -198,7 +227,8 @@ a red light go green.
 ```
 portfolio.accounts       from config.yaml, the only source of tax_type
 portfolio.securities     symbol reference, enriched by yfinance
-portfolio.holdings       position snapshot per account/symbol/date
+portfolio.holdings       position snapshot per account/symbol/date, plus
+                         value_as_of: when the number was really observed
 portfolio.lots           tax lots, from Fidelity directly or derived FIFO
 portfolio.transactions   buys, sells, dividends, for realized G/L and wash sales
 portfolio.prices         daily closes
@@ -230,6 +260,14 @@ exist.
 - **ETF sector exposure is not looked through.** A fund's holdings land under
   "Fund / Unclassified" rather than being spread across the sectors it actually
   holds.
+- **Exposure groups are configured, not looked through.** Grouping collapses the
+  tickers you list in `config.yaml`, so three S&P 500 funds report as one
+  exposure. It does NOT look inside a fund, so overlap between an S&P 500 fund
+  and a Nasdaq 100 fund in names like NVDA and AAPL stays invisible. True
+  single-name exposure is higher than any report here will say.
+- **A 401k holding both Roth and pre-tax money must be split into two accounts**
+  in `config.yaml`. That distinction decides whether the balance is ever taxed
+  again, and nothing downstream can recover it once the two are added together.
 - **"Substantially identical" is a legal test, not a ticker match.** When the
   tax agent lands, its wash-sale check matches on symbol. Two different S&P 500
   funds may be substantially identical with different tickers. It catches the

@@ -15,14 +15,23 @@ import yaml
 CONFIG_PATH = Path(__file__).parent / "config.yaml"
 EXAMPLE_PATH = Path(__file__).parent / "config.example.yaml"
 
-VALID_PLATFORMS = {"fidelity", "empower", "robinhood"}
-VALID_TAX_TYPES = {"taxable", "traditional_ira", "roth_ira", "401k", "hsa", "529"}
+VALID_PLATFORMS = {"fidelity", "empower", "robinhood", "manual"}
+# roth_401k is distinct from 401k: a plan can hold both, and which is which
+# decides whether the money is ever taxed again.
+VALID_TAX_TYPES = {"taxable", "traditional_ira", "roth_ira",
+                   "401k", "roth_401k", "hsa", "529"}
+VALID_ASSET_CLASSES = {"us_equity", "intl_equity", "bond", "cash", "alt", "unknown"}
 
 DEFAULT_THRESHOLDS = {
     "concentration_warn_pct": 0.10,
     "tlh_min_loss_usd": 500,
     "long_term_watch_days": 60,
     "earnings_watch_days": 30,
+    # A value from the prior close is not stale. Only flag a position when its
+    # value predates the snapshot by more than this, or a routine one-day lag
+    # between a Friday close and a Saturday snapshot gets reported as a data
+    # quality problem and drowns out the accounts that really are months old.
+    "stale_after_days": 7,
 }
 
 
@@ -89,10 +98,63 @@ def load_config(path: Path | None = None) -> dict:
                 "Drift reporting is meaningless otherwise."
             )
 
+    # Exposure groups collapse several tickers that track the same thing into one
+    # exposure. Without them, holding the S&P 500 through a 401k pool, VOO, and
+    # FXAIX reads as three comfortable-looking positions instead of one large one.
+    groups = cfg.get("exposure_groups") or {}
+    seen_symbols: dict[str, str] = {}
+    for group, symbols in groups.items():
+        if not isinstance(symbols, list) or not symbols:
+            raise ConfigError(f"exposure_groups['{group}'] must be a non-empty list.")
+        for sym in symbols:
+            sym = str(sym).strip().upper()
+            if sym in seen_symbols and seen_symbols[sym] != group:
+                raise ConfigError(
+                    f"Symbol {sym} appears in two exposure groups "
+                    f"('{seen_symbols[sym]}' and '{group}'). A symbol maps to one "
+                    "exposure, or the weights would double count."
+                )
+            seen_symbols[sym] = group
+
+    overrides = {
+        str(k).strip().upper(): str(v).strip()
+        for k, v in (cfg.get("symbol_overrides") or {}).items()
+    }
+
+    bad = {
+        s: c for s, c in (cfg.get("asset_class_overrides") or {}).items()
+        if c not in VALID_ASSET_CLASSES
+    }
+    if bad:
+        raise ConfigError(
+            f"asset_class_overrides has invalid classes: {bad}. "
+            f"Valid: {sorted(VALID_ASSET_CLASSES)}"
+        )
+
     cfg["accounts"] = accounts
     cfg["targets"] = targets
+    cfg["exposure_groups"] = {g: [str(x).strip().upper() for x in syms]
+                              for g, syms in groups.items()}
+    cfg["symbol_to_exposure"] = seen_symbols
+    cfg["symbol_overrides"] = overrides
     cfg["thresholds"] = {**DEFAULT_THRESHOLDS, **(cfg.get("thresholds") or {})}
     return cfg
+
+
+def exposure_for(symbol: str, cfg: dict) -> str:
+    """Exposure group a symbol belongs to, or the symbol itself if ungrouped."""
+    return cfg.get("symbol_to_exposure", {}).get(str(symbol).upper(), symbol)
+
+
+def resolve_symbol(symbol: str, cfg: dict) -> str:
+    """Ticker to send to the market data provider.
+
+    Some symbols in a portfolio are not the symbol a data provider knows. Crypto
+    on Robinhood shows as BTC but yfinance wants BTC-USD, and a 401k collective
+    trust has no public ticker at all so it has to be priced off its retail
+    equivalent.
+    """
+    return cfg.get("symbol_overrides", {}).get(str(symbol).upper(), symbol)
 
 
 def accounts_by_mask(cfg: dict) -> dict[str, dict]:
@@ -133,4 +195,10 @@ if __name__ == "__main__":
         mask = f" (...{a['mask4']})" if a.get("mask4") else ""
         print(f"  {a['account_id']:<20} {a['platform']:<10} {a['tax_type']:<16} {label}{mask}")
     print(f"\ntargets:    {c['targets'] or '(none set)'}")
+    if c["exposure_groups"]:
+        print("exposure groups:")
+        for g, syms in c["exposure_groups"].items():
+            print(f"  {g:<14} {', '.join(syms)}")
+    if c["symbol_overrides"]:
+        print(f"symbol overrides: {c['symbol_overrides']}")
     print(f"thresholds: {c['thresholds']}")

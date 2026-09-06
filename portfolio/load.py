@@ -260,6 +260,13 @@ def load(as_of: date | None, dry_run: bool, archive: bool, allow_unknown: bool) 
         for row_idx, reason in r.drops:
             rec.note(f"{r.source_file} row {row_idx}: {reason}")
 
+    # Broker parsers do not set value_as_of; their numbers are current as of the
+    # snapshot by definition. Only the manual parser can say otherwise.
+    for h in holdings:
+        h.setdefault("value_as_of", h.get("as_of_date"))
+    for lot in lots:
+        lot.setdefault("value_as_of", lot.get("as_of_date"))
+
     holdings = dedupe_holdings(holdings, rec)
 
     snapshot_date = as_of or max(
@@ -293,6 +300,15 @@ def load(as_of: date | None, dry_run: bool, archive: bool, allow_unknown: bool) 
         )
 
     reconcile_totals(holdings, stated, rec)
+
+    unpriced = [h for h in holdings if h.get("market_value") is None]
+    if unpriced:
+        rec.warn(
+            f"{len(unpriced)} position(s) have no market value yet: "
+            + ", ".join(sorted(h["symbol"] for h in unpriced))
+            + ". Account totals above exclude them. Run enrich.py to price them, "
+            "then re-check."
+        )
 
     # Cost basis coverage drives whether the tax agent can do anything at all.
     no_basis = [h for h in holdings if h.get("cost_basis_total") is None]

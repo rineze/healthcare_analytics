@@ -52,7 +52,13 @@ that future reports will lead with the diff.
 
 ### 2. Flags
 Only things that need a decision or a look:
-- Positions over the concentration threshold (`concentration.over_threshold`)
+- Exposures over the concentration threshold
+  (`concentration.by_exposure.over_threshold`). **Lead with the exposure number,
+  not the symbol number.** Several tickers tracking the same index is one bet,
+  and reporting them separately understates the risk. Quote
+  `concentration.look_through_limitation` so the figure is not read as a ceiling:
+  overlap inside different funds is not looked through.
+- Individual positions over the threshold (`concentration.by_symbol.over_threshold`)
 - Asset classes materially off target (`allocation.by_asset_class`, the `drift`
   and `drift_dollars` fields)
 - Lots approaching long-term treatment (`watchlist.approaching_long_term`)
@@ -81,7 +87,13 @@ Report the numbers. Do not editorialize about whether something is cheap.
 ### 6. Data gaps
 Straight from `data_quality`. Every gap, stated plainly: which positions have no
 cost basis, which accounts have no lot detail, which symbols failed enrichment,
-how many lots were derived rather than reported by the broker.
+how many lots were derived rather than reported by the broker, and which
+positions have no market value yet (`positions_missing_market_value`).
+
+**Staleness gets its own line** when `data_quality.staleness.stale_position_count`
+is above zero: how many dollars, what share of the portfolio, how old, and which
+accounts. A reader who does not know that a quarter of the book is carrying
+three-month-old values will misread every number above it.
 
 This section is not optional and does not get skipped when it is empty. If there
 are no gaps, say so, because "no gaps" is itself information.

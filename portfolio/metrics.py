@@ -93,7 +93,7 @@ def holdings_frame(as_of: date) -> pd.DataFrame:
                h.symbol, s.name, s.security_type, s.sector, s.industry,
                s.asset_class, s.enrich_status,
                h.quantity, h.price, h.market_value,
-               h.cost_basis_total, h.unrealized_gl, h.source
+               h.cost_basis_total, h.unrealized_gl, h.source, h.value_as_of
         FROM {SCHEMA}.holdings h
         JOIN {SCHEMA}.accounts a ON a.account_id = h.account_id
         LEFT JOIN {SCHEMA}.securities s ON s.symbol = h.symbol
@@ -108,7 +108,7 @@ def lots_frame(as_of: date) -> pd.DataFrame:
         f"""
         SELECT l.lot_id, l.account_id, a.tax_type, l.symbol, l.acquired_date,
                l.quantity, l.cost_basis, l.cost_per_share, l.market_value,
-               l.unrealized_gl, l.term, l.source_file
+               l.unrealized_gl, l.term, l.source_file, l.value_as_of
         FROM {SCHEMA}.lots l
         JOIN {SCHEMA}.accounts a ON a.account_id = l.account_id
         WHERE l.as_of_date = %s
@@ -179,27 +179,89 @@ def positions(h: pd.DataFrame) -> list[dict]:
     return sorted(out, key=lambda p: p["market_value"], reverse=True)
 
 
-def concentration(pos: list[dict], threshold: float) -> dict:
-    """Top-weight exposure and Herfindahl index.
+def _concentration_stats(weights: list[float]) -> dict:
+    """Top-N weights and Herfindahl index for a set of weights.
 
-    HHI is the sum of squared weights: 1.0 is everything in one name, and 1/N is
-    a perfectly equal-weighted book. It catches concentration that a top-5 list
-    can hide.
+    HHI is the sum of squared weights: 1.0 is everything in one thing, and 1/N is
+    perfectly equal-weighted. Its reciprocal is the "effective" number of
+    independent positions, which catches concentration a top-5 list hides.
     """
-    weights = [p["weight"] for p in pos if p["weight"] is not None]
-    hhi = sum(w * w for w in weights)
-
+    ranked = sorted(weights, reverse=True)
+    hhi = sum(w * w for w in ranked)
     return {
-        "top_5_weight": round(sum(w for w in sorted(weights, reverse=True)[:5]), 4),
-        "top_10_weight": round(sum(w for w in sorted(weights, reverse=True)[:10]), 4),
+        "top_1_weight": round(ranked[0], 4) if ranked else None,
+        "top_5_weight": round(sum(ranked[:5]), 4),
+        "top_10_weight": round(sum(ranked[:10]), 4),
         "hhi": round(hhi, 4),
         "effective_positions": round(1 / hhi, 1) if hhi else None,
+    }
+
+
+def concentration(pos: list[dict], threshold: float, cfg: dict) -> dict:
+    """Concentration at two levels: what you hold, and what you are exposed to.
+
+    Symbol level alone is misleading whenever the same underlying exposure is
+    held through several tickers. Three separate S&P 500 funds across three
+    accounts look like a comfortable spread and are in fact one bet. The
+    exposure level collapses them via config.exposure_groups and is the number
+    that should drive any decision.
+    """
+    weights = [p["weight"] for p in pos if p["weight"] is not None]
+
+    by_symbol = _concentration_stats(weights)
+    by_symbol["over_threshold"] = [
+        {"symbol": p["symbol"], "weight": p["weight"], "market_value": p["market_value"]}
+        for p in pos
+        if p["weight"] is not None and p["weight"] > threshold
+    ]
+
+    grouped: dict[str, dict] = {}
+    for p in pos:
+        exposure = config_mod.exposure_for(p["symbol"], cfg)
+        slot = grouped.setdefault(exposure, {
+            "exposure": exposure,
+            "market_value": 0.0,
+            "weight": 0.0,
+            "symbols": [],
+            "is_group": exposure in cfg.get("exposure_groups", {}),
+        })
+        slot["market_value"] += p["market_value"]
+        slot["weight"] += p["weight"] or 0.0
+        slot["symbols"].append(p["symbol"])
+
+    exposures = sorted(grouped.values(), key=lambda e: e["market_value"], reverse=True)
+    for e in exposures:
+        e["market_value"] = round(e["market_value"], 2)
+        e["weight"] = round(e["weight"], 4)
+        e["symbols"] = sorted(set(e["symbols"]))
+
+    by_exposure = _concentration_stats([e["weight"] for e in exposures])
+    by_exposure["over_threshold"] = [
+        {"exposure": e["exposure"], "weight": e["weight"],
+         "market_value": e["market_value"], "symbols": e["symbols"]}
+        for e in exposures if e["weight"] > threshold
+    ]
+    by_exposure["exposures"] = exposures
+
+    return {
         "threshold": threshold,
-        "over_threshold": [
-            {"symbol": p["symbol"], "weight": p["weight"], "market_value": p["market_value"]}
-            for p in pos
-            if p["weight"] is not None and p["weight"] > threshold
-        ],
+        "by_symbol": by_symbol,
+        "by_exposure": by_exposure,
+        # Exposure grouping only collapses tickers named in config.yaml. It does
+        # NOT look through a fund to its underlying holdings, so overlap between
+        # an S&P 500 fund and a Nasdaq 100 fund in names like NVDA and AAPL is
+        # still invisible. Real single-name exposure is higher than reported.
+        "look_through_limitation": (
+            "Exposure groups collapse configured tickers only. Overlapping "
+            "holdings inside different funds are not looked through, so true "
+            "single-name exposure is understated."
+        ),
+        # Backwards compatible with the flat shape the first version emitted.
+        "top_5_weight": by_symbol["top_5_weight"],
+        "top_10_weight": by_symbol["top_10_weight"],
+        "hhi": by_symbol["hhi"],
+        "effective_positions": by_symbol["effective_positions"],
+        "over_threshold": by_symbol["over_threshold"],
     }
 
 
@@ -555,6 +617,49 @@ def since_last_run(agent: str, pos: list[dict], t: dict) -> dict:
     }
 
 
+def staleness(h: pd.DataFrame, as_of: date, tolerance_days: int) -> dict:
+    """How much of the book is carrying values older than the snapshot.
+
+    A position priced at the prior close is not stale, so a tolerance applies.
+    What matters is the account nobody refreshed for three months, whose value is
+    being read as if it were current.
+    """
+    if "value_as_of" not in h.columns:
+        return {"available": False, "reason": "value_as_of not populated"}
+
+    total_mv = h["market_value"].astype(float).sum()
+    rows, stale_mv, oldest = [], 0.0, None
+
+    for _, r in h.iterrows():
+        if pd.isna(r["value_as_of"]):
+            continue
+        observed = pd.Timestamp(r["value_as_of"]).date()
+        age = (as_of - observed).days
+        if age <= tolerance_days:
+            continue
+        mv = float(r["market_value"]) if not pd.isna(r["market_value"]) else 0.0
+        stale_mv += mv
+        oldest = observed if oldest is None else min(oldest, observed)
+        rows.append({
+            "account_id": r["account_id"],
+            "symbol": r["symbol"],
+            "market_value": round(mv, 2),
+            "value_as_of": observed,
+            "days_old": age,
+        })
+
+    return {
+        "available": True,
+        "tolerance_days": tolerance_days,
+        "stale_position_count": len(rows),
+        "stale_market_value": round(stale_mv, 2),
+        "stale_pct_of_portfolio": round(stale_mv / total_mv, 4) if total_mv else 0.0,
+        "oldest_value_as_of": oldest,
+        "stale_accounts": sorted({r["account_id"] for r in rows}),
+        "positions": sorted(rows, key=lambda r: -r["market_value"]),
+    }
+
+
 def data_quality(h: pd.DataFrame, lots: pd.DataFrame, cfg: dict) -> dict:
     """What the report cannot say, and why.
 
@@ -577,6 +682,9 @@ def data_quality(h: pd.DataFrame, lots: pd.DataFrame, cfg: dict) -> dict:
         "symbols_not_enriched": sorted(unenriched["symbol"].unique().tolist()),
         "equities_missing_sector": sorted(no_sector["symbol"].unique().tolist()),
         "accounts_without_lot_detail": sorted(accounts_all - accounts_with_lots),
+        "positions_missing_market_value": sorted(
+            h[h["market_value"].isna()]["symbol"].tolist()
+        ),
         "derived_lot_count": int(len(derived_lots)),
         "lot_detail_available": bool(len(lots)),
         "targets_configured": bool(cfg.get("targets")),
@@ -623,7 +731,7 @@ def build(agent: str = "investment-analyst") -> dict:
             }
             for aid, grp in h.groupby("account_id")
         ],
-        "concentration": concentration(pos, th["concentration_warn_pct"]),
+        "concentration": concentration(pos, th["concentration_warn_pct"], cfg),
         "allocation": allocation(h, cfg.get("targets") or {}),
         "sector_exposure": sector_exposure(h),
         "contributors": contributors(current, prior),
@@ -637,7 +745,10 @@ def build(agent: str = "investment-analyst") -> dict:
             "upcoming_earnings": earnings_watch(symbols, th["earnings_watch_days"]),
         },
         "since_last_run": since_last_run(agent, pos, t),
-        "data_quality": data_quality(h, lots, cfg),
+        "data_quality": {
+            **data_quality(h, lots, cfg),
+            "staleness": staleness(h, current, th["stale_after_days"]),
+        },
         "thresholds": th,
     }
 
@@ -688,11 +799,24 @@ def print_summary(p: dict) -> None:
         print(f"    {pos['symbol']:<8}{pos['weight']:>7.1%}  ${pos['market_value']:>12,.2f}  {gl:>8}")
 
     c = p["concentration"]
-    print(f"\n  Concentration   top 5 {c['top_5_weight']:.1%}, "
-          f"HHI {c['hhi']:.3f} ({c['effective_positions']} effective positions)")
-    for over in c["over_threshold"]:
-        print(f"    ! {over['symbol']} at {over['weight']:.1%}, "
+    bs, be = c["by_symbol"], c["by_exposure"]
+    print(f"\n  Concentration   by symbol:   top 5 {bs['top_5_weight']:.1%}, "
+          f"HHI {bs['hhi']:.3f} ({bs['effective_positions']} effective)")
+    print(f"                  by exposure: top 5 {be['top_5_weight']:.1%}, "
+          f"HHI {be['hhi']:.3f} ({be['effective_positions']} effective)")
+    for e in be["exposures"][:6]:
+        if e["is_group"]:
+            print(f"    {e['exposure']:<16}{e['weight']:>7.1%}  ${e['market_value']:>12,.0f}"
+                  f"  [{', '.join(e['symbols'])}]")
+    for over in be["over_threshold"]:
+        print(f"    ! {over['exposure']} at {over['weight']:.1%}, "
               f"over the {c['threshold']:.0%} threshold")
+
+    st = p["data_quality"].get("staleness") or {}
+    if st.get("available") and st["stale_position_count"]:
+        print(f"\n  Stale values    ${st['stale_market_value']:,.0f} "
+              f"({st['stale_pct_of_portfolio']:.0%}) back to {st['oldest_value_as_of']} "
+              f"in {', '.join(st['stale_accounts'])}")
 
     dq = p["data_quality"]
     gaps = []

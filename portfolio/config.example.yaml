@@ -9,9 +9,10 @@ accounts:
   # account_id is a slug you choose. It never changes, so keep it short and
   # obvious. It is what shows up in every report.
   - account_id: fid-brokerage
-    platform: fidelity          # fidelity | empower | robinhood
+    platform: fidelity          # fidelity | empower | robinhood | manual
     label: "Fidelity Individual"
-    tax_type: taxable           # taxable | traditional_ira | roth_ira | 401k | hsa | 529
+    # taxable | traditional_ira | roth_ira | 401k | roth_401k | hsa | 529
+    tax_type: taxable
     mask4: "1234"               # LAST FOUR DIGITS ONLY. Never the full number.
 
   - account_id: fid-roth
@@ -29,16 +30,29 @@ accounts:
   # Accounts you only see through Empower (an old 401k, an HSA) go here too.
   # Anything Empower reports that is ALSO exported directly from the broker gets
   # deduped automatically, with the broker's own numbers winning.
-  - account_id: emp-401k
+  #
+  # A 401k holding BOTH Roth and pre-tax money should be split into two accounts.
+  # That distinction decides whether the balance is ever taxed again, and no
+  # report can recover it once the two are added together.
+  - account_id: emp-401k-pretax
     platform: empower
-    label: "Rad Partners 401k"
+    label: "Employer 401k - pre-tax sources"
     tax_type: 401k
+    mask4: "3456"
+
+  - account_id: emp-401k-roth
+    platform: empower
+    label: "Employer 401k - Roth sources"
+    tax_type: roth_401k
     mask4: "3456"
 
 
 # Optional. Drives the allocation drift section. Must sum to 1.0.
 # Delete this block entirely if you would rather not set targets, and drift
 # reporting will be skipped instead of comparing against numbers you never chose.
+# Leave it empty if a large chunk of the book is earmarked cash (a house fund,
+# say), or every report will flag a permanent overweight that you put there on
+# purpose.
 targets:
   us_equity: 0.65
   intl_equity: 0.15
@@ -46,9 +60,33 @@ targets:
   cash: 0.05
 
 
+# Tickers that track the same underlying thing, collapsed into one exposure for
+# concentration reporting. Without this, holding the S&P 500 through a 401k pool,
+# VOO, and FXAIX reads as three moderate positions instead of one large one, and
+# the report understates your real concentration.
+# A symbol may appear in only one group.
+exposure_groups:
+  # sp500:
+  #   - VOO
+  #   - FXAIX
+  #   - FID500IDX
+  # cash_equivalent:
+  #   - SPAXX
+  #   - SGOV
+
+
+# What the market data provider needs when it differs from what the broker shows.
+# Crypto is the common case; a 401k collective trust with no public ticker is the
+# other, priced off its retail equivalent.
+symbol_overrides:
+  # BTC: BTC-USD
+  # FID500IDX: FXAIX
+
+
 # Optional. enrich.py guesses asset class from the fund name and yfinance
 # metadata, which works for obvious cases and misses judgment calls. Pin
 # anything it gets wrong here.
+# Valid: us_equity | intl_equity | bond | cash | alt | unknown
 asset_class_overrides:
   # SPAXX: cash
   # VXUS: intl_equity

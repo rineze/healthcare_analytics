@@ -144,8 +144,13 @@ def next_earnings(ticker) -> date | None:
     return None
 
 
-def enrich_securities(symbols: list[str], overrides: dict) -> tuple[int, int]:
-    """Fetch profile + fundamentals for each symbol. Returns (ok, failed)."""
+def enrich_securities(symbols: list[str], overrides: dict, cfg: dict) -> tuple[int, int]:
+    """Fetch profile + fundamentals for each symbol. Returns (ok, failed).
+
+    Fetches using the provider's ticker but stores under the portfolio's symbol,
+    so a 401k pool with no public ticker and a crypto position both land in the
+    same tables as everything else and every downstream join stays simple.
+    """
     import yfinance as yf
 
     sec_rows, fund_rows = [], []
@@ -153,8 +158,9 @@ def enrich_securities(symbols: list[str], overrides: dict) -> tuple[int, int]:
     ok = failed = 0
 
     for symbol in symbols:
+        provider = config_mod.resolve_symbol(symbol, cfg)
         try:
-            ticker = yf.Ticker(symbol)
+            ticker = yf.Ticker(provider)
             info = ticker.info or {}
         except Exception as exc:
             print(f"    ! {symbol}: {type(exc).__name__}: {exc}")
@@ -163,7 +169,8 @@ def enrich_securities(symbols: list[str], overrides: dict) -> tuple[int, int]:
         # yfinance returns a near-empty dict for symbols it cannot resolve.
         if not info.get("quoteType") and not info.get("longName"):
             failed += 1
-            print(f"    ? {symbol}: not found")
+            via = f" (as {provider})" if provider != symbol else ""
+            print(f"    ? {symbol}{via}: not found")
             sec_rows.append({
                 "symbol": symbol, "name": None, "security_type": None,
                 "sector": None, "industry": None, "asset_class": "unknown",
@@ -204,16 +211,28 @@ def enrich_securities(symbols: list[str], overrides: dict) -> tuple[int, int]:
     return ok, failed
 
 
-def refresh_prices(symbols: list[str], days: int = 400) -> int:
-    """Pull daily closes. 400 days covers a full year of trading plus a buffer."""
+def refresh_prices(symbols: list[str], cfg: dict, days: int = 400) -> int:
+    """Pull daily closes. 400 days covers a full year of trading plus a buffer.
+
+    Downloads by provider ticker and writes back under the portfolio symbol. Two
+    portfolio symbols may resolve to the same provider ticker (a 401k pool priced
+    off its retail equivalent, say), so one download can fan out to several rows.
+    """
     import yfinance as yf
 
     if not symbols:
         return 0
 
+    # provider ticker -> the portfolio symbols that should receive its prices
+    fanout: dict[str, list[str]] = {}
+    for sym in symbols:
+        fanout.setdefault(config_mod.resolve_symbol(sym, cfg), []).append(sym)
+
+    providers = sorted(fanout)
+
     try:
         data = yf.download(
-            symbols, period=f"{days}d", interval="1d",
+            providers, period=f"{days}d", interval="1d",
             auto_adjust=False, progress=False, group_by="column", threads=True,
         )
     except Exception as exc:
@@ -226,19 +245,53 @@ def refresh_prices(symbols: list[str], days: int = 400) -> int:
 
     close = data["Close"] if "Close" in data else data
     if isinstance(close, pd.Series):
-        close = close.to_frame(symbols[0])
+        close = close.to_frame(providers[0])
 
     rows = []
-    for symbol in close.columns:
-        series = close[symbol].dropna()
-        for ts, value in series.items():
-            rows.append({
-                "symbol": str(symbol),
-                "price_date": pd.Timestamp(ts).date(),
-                "close": float(value),
-            })
+    for provider in close.columns:
+        series = close[provider].dropna()
+        for portfolio_symbol in fanout.get(str(provider), [str(provider)]):
+            for ts, value in series.items():
+                rows.append({
+                    "symbol": portfolio_symbol,
+                    "price_date": pd.Timestamp(ts).date(),
+                    "close": float(value),
+                })
 
     return db.upsert("prices", rows, ["symbol", "price_date"])
+
+
+def backfill_holding_values() -> int:
+    """Price positions that arrived with a share count but no market value.
+
+    Robinhood reports crypto and fractional shares as a quantity with no dollar
+    figure. Rather than drop those positions or guess, they load unpriced and get
+    valued here off the latest close.
+    """
+    sql = f"""
+        WITH latest AS (
+            SELECT DISTINCT ON (symbol) symbol, close, price_date
+            FROM {db.SCHEMA}.prices
+            ORDER BY symbol, price_date DESC
+        )
+        UPDATE {db.SCHEMA}.holdings h
+        SET price         = latest.close,
+            market_value  = round(h.quantity * latest.close, 2),
+            unrealized_gl = CASE
+                WHEN h.cost_basis_total IS NOT NULL
+                THEN round(h.quantity * latest.close - h.cost_basis_total, 2)
+                ELSE h.unrealized_gl END,
+            -- The value is now as of the price date, not the old snapshot date.
+            value_as_of   = latest.price_date
+        FROM latest
+        WHERE h.symbol = latest.symbol
+          AND h.market_value IS NULL
+          AND h.quantity IS NOT NULL
+    """
+    with db.get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(sql)
+            return cur.rowcount
 
 
 def backfill_lot_values() -> int:
@@ -290,13 +343,17 @@ def main() -> int:
         targets = stale_symbols(symbols, args.full)
         if targets:
             print(f"  Enriching {len(targets)} symbol(s)")
-            ok, failed = enrich_securities(targets, overrides)
+            ok, failed = enrich_securities(targets, overrides, cfg)
             print(f"  Profile and fundamentals: {ok} ok, {failed} not found")
         else:
             print(f"  All profiles fresh (updated within {STALE_AFTER_DAYS} days)")
 
-    n = refresh_prices(symbols)
+    n = refresh_prices(symbols, cfg)
     print(f"  Loaded {n} daily price row(s)")
+
+    priced = backfill_holding_values()
+    if priced:
+        print(f"  Priced {priced} position(s) that had quantity but no value")
 
     filled = backfill_lot_values()
     if filled:
