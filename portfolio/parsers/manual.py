@@ -18,6 +18,11 @@ Rules:
     than a silent drop.
   - Give quantity OR market_value. Both is better. If only quantity is present,
     enrich.py computes value from the latest close.
+  - ONE ROW PER TAX LOT. Repeat the same account_id and symbol for each lot with
+    its own acquired_date, quantity and cost_basis. The rows are summed into a
+    single position and each becomes its own lot, which is what a broker's
+    purchase history actually looks like and what any holding-period or
+    wash-sale question needs.
   - value_as_of records when the number was actually true. Leave it blank and it
     defaults to the snapshot date. Fill it in when an account has not been
     refreshed, so the database never claims a stale number is current.
@@ -102,6 +107,7 @@ def parse(path: Path, cfg: dict, kind: str, as_of: date | None = None) -> ParseR
         return result
 
     known_accounts = {a["account_id"] for a in cfg["accounts"]}
+    positions: dict[tuple, dict] = {}
     valued_without_qty = 0
 
     for idx, row in df.iterrows():
@@ -151,19 +157,38 @@ def parse(path: Path, cfg: dict, kind: str, as_of: date | None = None) -> ParseR
 
         value_as_of = clean_date(get(row, cols["value_as_of"])) or result.as_of_date
 
-        result.holdings.append({
-            "as_of_date": result.as_of_date,
-            "account_id": account_id,
-            "symbol": symbol,
-            "quantity": quantity,
-            "price": price,
-            "market_value": market_value,
-            "cost_basis_total": cost_basis,
-            "unrealized_gl": unrealized,
-            "source": "manual",
-            "source_file": path.name,
-            "value_as_of": value_as_of,
-        })
+        # Several rows can describe one position, one per tax lot. Accumulate
+        # into a single holding so the position table stays one row per symbol
+        # while the lot detail below stays intact.
+        key = (account_id, symbol)
+        pos = positions.get(key)
+        if pos is None:
+            positions[key] = {
+                "as_of_date": result.as_of_date,
+                "account_id": account_id,
+                "symbol": symbol,
+                "quantity": quantity,
+                "price": price,
+                "market_value": market_value,
+                "cost_basis_total": cost_basis,
+                "unrealized_gl": unrealized,
+                "source": "manual",
+                "source_file": path.name,
+                "value_as_of": value_as_of,
+            }
+        else:
+            for field, value in (("quantity", quantity),
+                                 ("market_value", market_value),
+                                 ("cost_basis_total", cost_basis)):
+                if value is not None:
+                    pos[field] = value if pos[field] is None else pos[field] + value
+            if price is not None and pos["price"] is None:
+                pos["price"] = price
+            # Oldest observation wins: a position is only as current as its
+            # least current input.
+            pos["value_as_of"] = min(pos["value_as_of"], value_as_of)
+            if pos["market_value"] is not None and pos["cost_basis_total"] is not None:
+                pos["unrealized_gl"] = pos["market_value"] - pos["cost_basis_total"]
 
         # An acquisition date on a manual row makes it a usable tax lot too,
         # which is the only way a hand-entered position ever gets one.
@@ -184,6 +209,17 @@ def parse(path: Path, cfg: dict, kind: str, as_of: date | None = None) -> ParseR
                 "source_file": path.name,
                 "value_as_of": value_as_of,
             })
+
+    result.holdings.extend(positions.values())
+
+    multi = [f"{a}/{sym}" for (a, sym), _ in positions.items()
+             if sum(1 for l in result.lots
+                    if l["account_id"] == a and l["symbol"] == sym) > 1]
+    if multi:
+        result.warn(
+            f"{len(multi)} position(s) built from multiple tax lots: "
+            + ", ".join(sorted(multi))
+        )
 
     # Only genuinely old values are worth flagging. A position priced at the
     # prior close is not stale, and lumping it in with one that is months old
