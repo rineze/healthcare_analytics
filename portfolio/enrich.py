@@ -175,11 +175,20 @@ def enrich_securities(symbols: list[str], overrides: dict, cfg: dict) -> tuple[i
             failed += 1
             via = f" (as {provider})" if provider != symbol else ""
             print(f"    ? {symbol}{via}: not found")
-            sec_rows.append({
+            # A failed lookup must never overwrite what the user declared. Writing
+            # 'unknown' here would silently destroy a statement of fact because a
+            # third-party API was unreachable, which is precisely backwards.
+            row = {
                 "symbol": symbol, "name": None, "security_type": None,
-                "sector": None, "industry": None, "asset_class": "unknown",
+                "sector": None, "industry": None,
                 "enrich_status": "not_found", "updated_at": datetime.now(),
-            })
+            }
+            if symbol in overrides:
+                row["asset_class"] = overrides[symbol]
+                row["enrich_status"] = "declared"
+            else:
+                row["asset_class"] = "unknown"
+            sec_rows.append(row)
             continue
 
         ok += 1

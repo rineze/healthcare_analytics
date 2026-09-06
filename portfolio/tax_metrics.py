@@ -88,9 +88,44 @@ def _latest_lot_date() -> date | None:
     return pd.Timestamp(df.iloc[0]["d"]).date()
 
 
-def _has_transactions() -> bool:
-    df = db.query(f"SELECT count(*) n FROM {SCHEMA}.transactions")
-    return int(df.iloc[0]["n"]) > 0
+def _transaction_coverage() -> dict:
+    """What the transaction history actually covers.
+
+    Existence is not coverage. A handful of rows is not a complete trade history,
+    and treating "some rows exist" as "detection is complete" produces a false
+    all-clear on exactly the question this module exists to answer: a position
+    bought and sold entirely inside the window leaves no open lot and is visible
+    only in transactions.
+
+    There is no way to prove a history is complete, so this reports what is there
+    and lets the caller phrase the limitation honestly rather than claiming one
+    of two binary states.
+    """
+    df = db.query(
+        f"""SELECT count(*) n, count(*) FILTER (WHERE action IN ('buy','sell')) trades,
+                   min(trade_date) earliest, max(trade_date) latest
+            FROM {SCHEMA}.transactions"""
+    )
+    r = df.iloc[0]
+    n, trades = int(r["n"]), int(r["trades"])
+    return {
+        "row_count": n,
+        "trade_count": trades,
+        "earliest": pd.Timestamp(r["earliest"]).date() if not pd.isna(r["earliest"]) else None,
+        "latest": pd.Timestamp(r["latest"]).date() if not pd.isna(r["latest"]) else None,
+        "limitation": (
+            "No transaction history is loaded. Detection runs off open lot "
+            "acquisition dates, so a position bought and closed inside the window "
+            "leaves no trace and cannot be seen."
+            if trades == 0 else
+            f"Transaction history holds {trades} trade record(s)"
+            + (f" spanning {pd.Timestamp(r['earliest']).date()} to "
+               f"{pd.Timestamp(r['latest']).date()}" if not pd.isna(r["earliest"]) else "")
+            + ". Completeness cannot be verified from inside this system. Where the "
+              "history is partial, a position bought and closed inside the window "
+              "leaves no open lot and stays invisible."
+        ),
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -248,14 +283,10 @@ def wash_sale_check(symbol: str, sale_date: date, cfg: dict) -> dict:
             "covered by it and the authority there is weaker."
         ) if permanent_loss_risk else None,
 
-        "transaction_history_loaded": _has_transactions(),
-        "detection_limitation": (
-            None if _has_transactions() else
-            "No transaction history is loaded. Detection runs off lot acquisition "
-            "dates, which capture purchases that produced an open lot but miss any "
-            "purchase already closed out. Load broker transaction history for "
-            "complete coverage."
-        ),
+        # Always present. Completeness is unprovable, so the caveat never
+        # disappears; it only changes shape.
+        "transaction_coverage": _transaction_coverage(),
+        "detection_limitation": _transaction_coverage()["limitation"],
     }
 
 
@@ -291,6 +322,19 @@ def tlh_candidates(as_of: date, min_loss: float, cfg: dict) -> dict:
         }
 
     losses = taxable[taxable["unrealized_gl"].notna() & (taxable["unrealized_gl"] < 0)]
+
+    # A lot with no gain/loss figure cannot be judged either way. Dropping it
+    # silently would let "could not be evaluated" read as "no loss here".
+    unevaluable_lots = taxable[taxable["unrealized_gl"].isna()]
+
+    # Positions with no basis never became lots at all, so they are invisible to
+    # everything above and have to be surfaced separately.
+    no_basis = db.query(
+        f"""SELECT h.account_id, h.symbol, h.market_value
+            FROM {SCHEMA}.holdings h JOIN {SCHEMA}.accounts a ON a.account_id = h.account_id
+            WHERE h.as_of_date = %s AND a.tax_type = ANY(%s) AND h.cost_basis_total IS NULL""",
+        (as_of, list(TAXABLE)),
+    )
 
     candidates = []
     for symbol, grp in losses.groupby("symbol"):
@@ -348,6 +392,25 @@ def tlh_candidates(as_of: date, min_loss: float, cfg: dict) -> dict:
         "total_long_term": round(total_long, 2),
         "below_threshold_symbols": below,
         "excluded_non_taxable_accounts": excluded_accounts,
+
+        "unevaluable": {
+            "lots_missing_gain_loss": int(len(unevaluable_lots)),
+            "taxable_positions_without_cost_basis": [
+                {"account_id": r["account_id"], "symbol": r["symbol"],
+                 "market_value": _f(r["market_value"])}
+                for _, r in no_basis.iterrows()
+            ],
+            "market_value_unevaluable": round(
+                float(no_basis["market_value"].astype(float).sum()), 2
+            ) if not no_basis.empty else 0.0,
+            "note": (
+                "These taxable positions have no cost basis on file, so they never "
+                "produced a tax lot and no gain or loss could be computed for them. "
+                "They are absent from the candidate list because they could not be "
+                "evaluated, NOT because they hold no loss."
+            ) if not no_basis.empty or len(unevaluable_lots) else None,
+        },
+
         "section_1211_ordinary_cap": SECTION_1211_ORDINARY_CAP,
         "netting_note": (
             "Losses net against gains of the same character first (short against "
@@ -371,10 +434,12 @@ def realized_gains(year: int) -> dict:
     from. An estimated realized gain is worse than no number, because it looks
     like a real one.
     """
-    if not _has_transactions():
+    cov = _transaction_coverage()
+    if cov["trade_count"] == 0:
         return {
             "available": False,
             "year": year,
+            "transaction_coverage": cov,
             "reason": (
                 "No transaction history is loaded. Realized gain/loss requires the "
                 "actual sale records; it cannot be derived from position snapshots. "
