@@ -117,6 +117,16 @@ alongside the database vars, since `healthcare_db.py` loads that file at import:
 ```bash
 TELEGRAM_BOT_TOKEN=8123456789:AAH...
 TELEGRAM_CHAT_ID=123456789
+
+# Optional. Exports default to ~/db_exports and arrive in Telegram.
+EXPORT_DIR=/Users/dan/db_exports
+
+# Optional. Only needed if you want /email to work.
+SMTP_HOST=smtp.gmail.com
+SMTP_PORT=587
+SMTP_USER=you@example.com
+SMTP_PASSWORD=an-app-password
+EXPORT_EMAIL_TO=you@example.com
 ```
 
 ## Run it
@@ -139,7 +149,15 @@ public URL, and it works behind a home router.
 | `/sources` | the full ledger |
 | `/run` | what it is allowed to run |
 | `/propose_<name>` | ask for an approval button, e.g. `/propose_load_ma` |
+| `/export <what>` | pull data into a spreadsheet, in plain English |
+| `/email` | mail the last export |
 | `/help` | the list |
+
+`/export exchange plans in California` turns your words into SQL, runs it,
+writes an .xlsx and uploads it into the chat with the query shown in the
+caption so you can see what it actually asked. Files also land in `EXPORT_DIR`
+(default `~/db_exports`). Over 100k rows it switches to CSV, and over 50MB
+Telegram will not take the upload so it tells you the path instead.
 
 Anything else goes to Claude Code headless with the repo as working directory,
 so "why is medicare_utilization untracked" gets a real answer rather than a
@@ -154,6 +172,18 @@ repeating the same five items is one you stop reading, which defeats the point.
 
 **It only answers you.** Anyone can message a Telegram bot if they find it, so
 every sender other than `TELEGRAM_CHAT_ID` is ignored.
+
+**Reads are free, writes are gated.** This is the line the whole design sits on:
+
+- A `SELECT` through a read-only role cannot damage anything. A wrong query
+  returns a wrong answer, which you can see and correct. So questions and
+  exports run without ceremony.
+- A write can destroy or corrupt. Those are allowlisted and need your tap.
+
+The role reads `meta`, `drinf`, `cms` and `payor_tracker`, and has no INSERT,
+UPDATE, DELETE or DDL anywhere. Verified in migration 005. Generated queries
+are also passed through `guard_select()`, which permits a single `SELECT` or
+`WITH` and nothing else, as a second lock on the same door.
 
 **It writes only with your approval.** Two separate limits:
 

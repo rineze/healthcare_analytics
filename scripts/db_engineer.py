@@ -51,7 +51,9 @@ rather than a live one, since an alert may sit unread for hours.
 
 import argparse
 import json
+import re
 import os
+import secrets
 import shutil
 import subprocess
 import sys
@@ -71,6 +73,10 @@ for _p in (str(_ROOT), str(_HERE)):
 
 from healthcare_db import get_connection  # noqa: E402
 from db_observer import build_message, collect  # noqa: E402
+from db_export import (  # noqa: E402
+    MAX_ROWS, UnsafeQuery, email_configured, email_file, export,
+    guard_select,
+)
 from db_actions import (  # noqa: E402
     ACTIONS, APPROVAL_TTL_SECONDS, ApprovalGate, actions_for_source,
     audit, run_action,
@@ -141,6 +147,57 @@ class Telegram:
             return False
         except Exception as e:
             print(f"send failed: {e}", file=sys.stderr)
+            return False
+
+    def send_document(self, path, caption=""):
+        """Upload a file to the chat. Telegram caps bot uploads at 50MB."""
+        path = Path(path)
+        size = path.stat().st_size
+        if size > 50 * 1024 * 1024:
+            self.send(f"{caption}\n\n<i>File is {size // 1048576}MB, over "
+                      f"Telegram's 50MB limit. It is saved at "
+                      f"<code>{_esc(path)}</code></i>")
+            return False
+
+        if self.dry_run:
+            print(f"[document] {path.name} ({size:,} bytes) :: {caption}")
+            return True
+
+        boundary = "----dbengineer" + secrets.token_hex(8)
+        parts = []
+
+        def field(name, value):
+            parts.append(f"--{boundary}\r\n".encode())
+            parts.append(
+                f'Content-Disposition: form-data; name="{name}"\r\n\r\n'.encode())
+            parts.append(f"{value}\r\n".encode())
+
+        field("chat_id", self.chat_id)
+        if caption:
+            field("caption", caption[:1024])
+            field("parse_mode", "HTML")
+
+        parts.append(f"--{boundary}\r\n".encode())
+        parts.append(
+            f'Content-Disposition: form-data; name="document"; '
+            f'filename="{path.name}"\r\n'.encode())
+        parts.append(b"Content-Type: application/octet-stream\r\n\r\n")
+        parts.append(path.read_bytes())
+        parts.append(f"\r\n--{boundary}--\r\n".encode())
+        body = b"".join(parts)
+
+        req = urllib.request.Request(
+            f"https://api.telegram.org/bot{self.token}/sendDocument",
+            data=body,
+            headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=180) as resp:
+                return json.loads(resp.read()).get("ok", False)
+        except Exception as e:
+            print(f"sendDocument failed: {e}", file=sys.stderr)
+            self.send(f"Couldn't upload it, but it's saved at "
+                      f"<code>{_esc(path)}</code>")
             return False
 
     def answer_callback(self, callback_id, text=""):
@@ -265,6 +322,8 @@ HELP = (
     "/health - database vitals\n"
     "/sources - the full ledger\n"
     "/run - what I can run for you\n"
+    "/export &lt;what&gt; - pull data into a spreadsheet\n"
+    "/email - mail me the last export\n"
     "/help - this\n\n"
     "Ask me anything in plain English and I'll dig into the repo and the "
     "database to answer.\n\n"
@@ -284,6 +343,80 @@ COMMANDS = {
 # ---------------------------------------------------------------------------
 # Anything else goes to Claude
 # ---------------------------------------------------------------------------
+
+SQL_PREAMBLE = """Write ONE PostgreSQL SELECT that answers the request below.
+
+Schemas: drinf holds the analytics tables (mpfs_rvu, mpfs_gpci,
+medicare_utilization, ma_cpsc_enrollment, ma_county_penetration,
+ma_plan_directory, pt_rates, county_to_market, ref_issuer, ref_hix_landscape,
+ref_ma_landscape, ref_medicaid_landscape, plan_lob_reference) plus v_ views.
+cms holds CMS provider data. meta.v_data_freshness tracks load status.
+Inspect the schema if you need column names.
+
+Output ONLY the SQL. No prose, no markdown fences, no trailing semicolon.
+It must be a single read-only SELECT or WITH.
+
+Request: """
+
+
+def _extract_sql(text):
+    """Pull SQL out of whatever Claude returned."""
+    text = text.strip()
+    fence = re.search(r"```(?:sql)?\s*(.+?)```", text, re.S | re.I)
+    if fence:
+        return fence.group(1).strip()
+    # Otherwise take from the first SELECT/WITH onward.
+    m = re.search(r"\b(select|with)\b", text, re.I)
+    return text[m.start():].strip() if m else text
+
+
+def cmd_export(request, tg):
+    """Plain English to a file in the chat.
+
+    Reads need no approval: the role cannot write, so a wrong query returns a
+    wrong answer rather than damage. The query is still guarded before it runs.
+    """
+    if not shutil.which("claude"):
+        return "Exports need the Claude Code CLI on PATH to turn your request into SQL."
+
+    tg.send(f"Working on: <i>{_esc(request)}</i>")
+
+    try:
+        proc = subprocess.run(["claude", "-p", SQL_PREAMBLE + request],
+                              capture_output=True, text=True,
+                              timeout=CLAUDE_TIMEOUT, cwd=str(_ROOT))
+    except subprocess.TimeoutExpired:
+        return "Timed out writing the query."
+    if proc.returncode != 0:
+        return f"Claude exited {proc.returncode}: {_esc(proc.stderr[:300])}"
+
+    sql = _extract_sql(proc.stdout)
+    try:
+        guard_select(sql)
+    except UnsafeQuery as e:
+        audit("export_blocked", reason=str(e), sql=sql[:400])
+        return f"I won't run that query: {_esc(e)}\n\n<pre>{_esc(sql[:500])}</pre>"
+
+    try:
+        path, nrows, truncated = export(sql, request[:40])
+    except Exception as e:
+        return f"Query failed: {_esc(e)}\n\n<pre>{_esc(sql[:500])}</pre>"
+
+    audit("export", rows=nrows, path=str(path), sql=sql[:400])
+
+    caption = f"<b>{nrows:,} rows</b>\n<pre>{_esc(sql[:600])}</pre>"
+    if truncated:
+        caption += f"\n<i>Capped at {MAX_ROWS:,} rows.</i>"
+    tg.send_document(path, caption)
+
+    LAST_EXPORT["path"] = str(path)
+    LAST_EXPORT["request"] = request
+
+    note = f"Saved to <code>{_esc(path)}</code>"
+    if email_configured():
+        note += "\nUse /email to also send the last export by mail."
+    return note
+
 
 CLAUDE_PREAMBLE = """You are a database engineer answering a question over \
 Telegram, so keep the reply under 250 words, plain text, no markdown headers \
@@ -320,7 +453,10 @@ def ask_claude(question):
     return _esc(answer) if answer else "Claude came back with nothing."
 
 
-def handle(text, gate=None, chat_id=None):
+LAST_EXPORT = {"path": None, "request": None}
+
+
+def handle(text, gate=None, chat_id=None, tg=None):
     """Route one incoming message.
 
     Returns (reply_text, buttons). buttons is None for a plain reply.
@@ -328,6 +464,28 @@ def handle(text, gate=None, chat_id=None):
     cmd = text.split()[0].lower() if text.split() else ""
     # Telegram appends @botname when a command is used in a group.
     cmd = cmd.split("@")[0]
+
+    # /export <plain english>. A read, so no approval: the role cannot write.
+    if cmd == "/export":
+        request = text[len("/export"):].strip()
+        if not request:
+            return ("Tell me what to export, for example:\n"
+                    "<code>/export exchange plans in California</code>"), None
+        if tg is None:
+            return "No chat available for the upload.", None
+        return cmd_export(request, tg), None
+
+    # /email mails the most recent export.
+    if cmd == "/email":
+        if not LAST_EXPORT["path"]:
+            return "Nothing exported yet. Try /export first.", None
+        if not email_configured():
+            return ("Email isn't set up. Add SMTP_HOST, SMTP_USER, "
+                    "SMTP_PASSWORD and EXPORT_EMAIL_TO to .env."), None
+        status = email_file(Path(LAST_EXPORT["path"]),
+                            f"Export: {LAST_EXPORT['request']}")
+        audit("email", path=LAST_EXPORT["path"], status=status)
+        return _esc(status), None
 
     if cmd in COMMANDS:
         try:
@@ -529,7 +687,7 @@ def main():
                 continue
 
             print(f"< {event['text']}")
-            reply, buttons = handle(event["text"], gate, event["chat"])
+            reply, buttons = handle(event["text"], gate, event["chat"], tg)
             tg.send(reply, buttons)
 
 
