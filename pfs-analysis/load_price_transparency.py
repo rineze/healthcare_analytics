@@ -10,18 +10,16 @@ from psycopg2.extras import execute_values
 from datetime import datetime, date
 from pathlib import Path
 import os
-from dotenv import load_dotenv
+# Connection config lives in healthcare_db.py at the repo root so every app and
+# loader resolves it identically. See docs/DATABASE_CONNECTIONS.md.
+import sys
+from pathlib import Path
 
-# Load environment
-load_dotenv(Path(__file__).parent.parent / ".env")
+_ROOT = str(Path(__file__).resolve().parent.parent)
+if _ROOT not in sys.path:
+    sys.path.insert(0, _ROOT)
 
-DB_CONFIG = {
-    "host": os.getenv("SUPABASE_HOST"),
-    "database": os.getenv("SUPABASE_DATABASE"),
-    "user": os.getenv("SUPABASE_USER"),
-    "password": os.getenv("SUPABASE_PASSWORD"),
-    "port": int(os.getenv("SUPABASE_PORT", 5432)),
-}
+from healthcare_db import loader_connection, REPO_ROOT  # noqa: E402,F401
 
 
 def create_tables(conn):
@@ -350,7 +348,7 @@ def main():
     print("Hospital Price Transparency Loader")
     print("=" * 60)
 
-    conn = psycopg2.connect(**DB_CONFIG)
+    conn = loader_connection()
 
     # Create tables
     create_tables(conn)

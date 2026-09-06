@@ -11,26 +11,19 @@ import os
 from datetime import datetime
 
 # Database connection
-from dotenv import load_dotenv
+# Connection config lives in healthcare_db.py at the repo root so every app and
+# loader resolves it identically. See docs/DATABASE_CONNECTIONS.md.
+import sys
 from pathlib import Path
-# Search for .env walking up the directory tree
-for _env in [Path(__file__).parent / ".env",
-             Path(__file__).parent.parent / ".env",
-             Path(__file__).parent.parent.parent / ".env"]:
-    if _env.exists():
-        load_dotenv(_env)
-        break
 
-DB_CONFIG = {
-    "host":     os.getenv("LOCAL_HOST", "127.0.0.1"),
-    "port":     int(os.getenv("LOCAL_PORT", 5432)),
-    "database": os.getenv("LOCAL_DATABASE", "postgres"),
-    "user":     os.getenv("LOCAL_USER", "postgres"),
-    "password": os.getenv("LOCAL_PASSWORD", ""),
-}
+_ROOT = str(Path(__file__).resolve().parent.parent)
+if _ROOT not in sys.path:
+    sys.path.insert(0, _ROOT)
+
+from healthcare_db import loader_connection, REPO_ROOT  # noqa: E402,F401
 
 # Data directory
-DATA_DIR = r"C:\dev\healthcare_analytics\pfs_data"
+DATA_DIR = os.getenv("PFS_DATA_DIR", str(REPO_ROOT / "pfs_data"))
 
 # Column mapping from CSV headers to database columns
 COLUMN_MAP = {
@@ -175,7 +168,7 @@ def load_to_postgres(df, conn):
 def main():
     # Connect to PostgreSQL
     print("Connecting to PostgreSQL...", flush=True)
-    conn = psycopg2.connect(**DB_CONFIG)
+    conn = loader_connection()
 
     # Get list of year directories
     years = sorted([d for d in os.listdir(DATA_DIR) if d.isdigit()])

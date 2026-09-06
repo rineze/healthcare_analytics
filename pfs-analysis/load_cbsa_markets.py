@@ -1,12 +1,3 @@
-import os
-from dotenv import load_dotenv
-from pathlib import Path
-for _env in [Path(__file__).parent / ".env",
-             Path(__file__).parent.parent / ".env",
-             Path(__file__).parent.parent.parent / ".env"]:
-    if _env.exists():
-        load_dotenv(_env)
-        break
 """
 load_cbsa_markets.py
 
@@ -31,6 +22,9 @@ Usage:
 To refresh: re-download the xlsx and re-run. All non-TN rows are upserted.
 """
 
+import os
+from pathlib import Path
+
 import re
 import openpyxl
 import psycopg2
@@ -40,19 +34,21 @@ from psycopg2.extras import execute_values
 # Config
 # ---------------------------------------------------------------------------
 
-CBSA_FILE = r"C:\dev\healthcare_analytics\pfs-analysis\cbsa_delineation_2023.xlsx"
+# Connection config lives in healthcare_db.py at the repo root. This loader is
+# the one that legitimately needs both databases in a single run: it reads MA
+# enrollment counties from local, then upserts the result to local AND Supabase.
+# See docs/DATABASE_CONNECTIONS.md.
+import sys
 
-DB_LOCAL = {
-    "host": "127.0.0.1", "port": 5432,
-    "dbname": "postgres", "user": "postgres", "password": os.getenv("LOCAL_PASSWORD", ""),
-}
+_ROOT = str(Path(__file__).resolve().parent.parent)
+if _ROOT not in sys.path:
+    sys.path.insert(0, _ROOT)
 
-DB_SUPABASE = {
-    "host": "aws-1-us-east-1.pooler.supabase.com", "port": 5432,
-    "dbname": "postgres",
-    "user": "postgres.numdlqsfydtypeurijae",
-    "password": os.getenv("SUPABASE_PASSWORD", ""),
-}
+from healthcare_db import get_connection, describe_target  # noqa: E402
+
+CBSA_FILE = os.getenv(
+    "CBSA_FILE", str(Path(__file__).resolve().parent / "cbsa_delineation_2023.xlsx")
+)
 
 # States with hand-curated markets — skip in this loader
 SKIP_STATES = {"TN"}
@@ -287,7 +283,8 @@ def main():
     print(f"  CBSA name entries: {len(by_name):,}")
 
     print("\nFetching MA enrollment counties from local DB...")
-    local = psycopg2.connect(**DB_LOCAL)
+    print(f"  source: {describe_target('local')}")
+    local = get_connection("local")
     enrollment_counties = get_enrollment_counties(local)
     print(f"  Counties to process: {len(enrollment_counties):,} (excl. {', '.join(SKIP_STATES)})")
 
@@ -313,7 +310,8 @@ def main():
     local.close()
 
     print("Upserting to Supabase...")
-    supa = psycopg2.connect(**DB_SUPABASE)
+    print(f"  target: {describe_target('supabase')}")
+    supa = get_connection("supabase")
     upsert(supa, rows, "supabase")
 
     # Summary by state

@@ -3,67 +3,17 @@ Shared utilities for MPFS Analytics Dashboard
 """
 import streamlit as st
 import pandas as pd
-import psycopg2
-import os
+
+# Connection config lives in healthcare_db.py at the repo root so every app and
+# loader resolves it identically. See docs/DATABASE_CONNECTIONS.md.
+import sys
 from pathlib import Path
-from dotenv import load_dotenv
 
-from dotenv import load_dotenv
-from pathlib import Path
-# Search for .env walking up the directory tree
-for _env in [Path(__file__).parent / ".env",
-             Path(__file__).parent.parent / ".env",
-             Path(__file__).parent.parent.parent / ".env"]:
-    if _env.exists():
-        load_dotenv(_env)
-        break
+_ROOT = str(Path(__file__).resolve().parent.parent)
+if _ROOT not in sys.path:
+    sys.path.insert(0, _ROOT)
 
-
-def get_db_config():
-    """Get database config with fallback chain: USE_LOCAL -> Streamlit secrets -> .env -> local."""
-    # 1. Check USE_LOCAL toggle in .env (local dev takes priority)
-    use_local = os.getenv("USE_LOCAL", "false").lower() == "true"
-
-    if use_local and os.getenv("LOCAL_HOST"):
-        # Use local database for development
-        return {
-            "host": os.getenv("LOCAL_HOST", "127.0.0.1"),
-            "database": os.getenv("LOCAL_DATABASE", "postgres"),
-            "user": os.getenv("LOCAL_USER", "postgres"),
-            "password": os.getenv("LOCAL_PASSWORD", ""),
-            "port": int(os.getenv("LOCAL_PORT", 5432)),
-        }
-
-    # 2. Try Streamlit secrets (for Streamlit Cloud deployment)
-    try:
-        return {
-            "host": st.secrets["database"]["host"],
-            "database": st.secrets["database"]["database"],
-            "user": st.secrets["database"]["user"],
-            "password": st.secrets["database"]["password"],
-            "port": st.secrets["database"]["port"],
-        }
-    except Exception:
-        pass
-
-    # 3. Try Supabase environment variables
-    if os.getenv("SUPABASE_HOST"):
-        return {
-            "host": os.getenv("SUPABASE_HOST"),
-            "database": os.getenv("SUPABASE_DATABASE", "postgres"),
-            "user": os.getenv("SUPABASE_USER", "postgres"),
-            "password": os.getenv("SUPABASE_PASSWORD"),
-            "port": int(os.getenv("SUPABASE_PORT", 5432)),
-        }
-
-    # 4. Fallback to local development defaults
-    return {
-        "host":     os.getenv("LOCAL_HOST", "127.0.0.1"),
-        "database": os.getenv("LOCAL_DATABASE", "postgres"),
-        "user":     os.getenv("LOCAL_USER", "postgres"),
-        "password": os.getenv("LOCAL_PASSWORD", ""),
-        "port":     int(os.getenv("LOCAL_PORT", 5432)),
-    }
+from healthcare_db import get_db_config, get_connection as _connect  # noqa: E402,F401
 
 # Color palette (Stephen Few - muted, semantic consistency)
 COLORS = {
@@ -188,7 +138,7 @@ def get_cpt_category_list():
 @st.cache_resource
 def get_connection():
     """Get database connection (cached)."""
-    return psycopg2.connect(**get_db_config())
+    return _connect()
 
 
 # ============================================================================

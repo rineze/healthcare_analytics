@@ -9,23 +9,16 @@ import requests
 from io import StringIO
 
 # Database configuration
-from dotenv import load_dotenv
+# Connection config lives in healthcare_db.py at the repo root so every app and
+# loader resolves it identically. See docs/DATABASE_CONNECTIONS.md.
+import sys
 from pathlib import Path
-# Search for .env walking up the directory tree
-for _env in [Path(__file__).parent / ".env",
-             Path(__file__).parent.parent / ".env",
-             Path(__file__).parent.parent.parent / ".env"]:
-    if _env.exists():
-        load_dotenv(_env)
-        break
 
-DB_CONFIG = {
-    "host":     os.getenv("LOCAL_HOST", "127.0.0.1"),
-    "port":     int(os.getenv("LOCAL_PORT", 5432)),
-    "database": os.getenv("LOCAL_DATABASE", "postgres"),
-    "user":     os.getenv("LOCAL_USER", "postgres"),
-    "password": os.getenv("LOCAL_PASSWORD", ""),
-}
+_ROOT = str(Path(__file__).resolve().parent.parent)
+if _ROOT not in sys.path:
+    sys.path.insert(0, _ROOT)
+
+from healthcare_db import loader_connection, REPO_ROOT  # noqa: E402,F401
 
 # CSV URLs by year (National + State level data)
 UTILIZATION_URLS = {
@@ -182,7 +175,7 @@ def main():
     print("=" * 60)
 
     # Connect to database
-    conn = psycopg2.connect(**DB_CONFIG)
+    conn = loader_connection()
 
     # Create table
     create_table(conn)
