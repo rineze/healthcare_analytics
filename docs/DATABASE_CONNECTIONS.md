@@ -110,15 +110,48 @@ password = "your_supabase_password"
 
 ### The code
 
-`pfs-analysis/utils.py` holds the reference implementation of `get_db_config()`
-and `get_connection()`. New code should import from there rather than
-re-implementing the chain. See [Section 6](#6-known-drift) for where that isn't
-true yet.
+`healthcare_db.py` at the repo root is the only place this chain is defined.
+Every app and loader imports from it. Do not write another `DB_CONFIG` dict.
+
+Because the projects are sibling directories rather than an installed package,
+consumers add the repo root to `sys.path` first. That works both locally and on
+Streamlit Cloud, which clones the whole repo:
 
 ```python
-from utils import get_connection
+import sys
+from pathlib import Path
 
-conn = get_connection()
+_ROOT = str(Path(__file__).resolve().parent.parent)
+if _ROOT not in sys.path:
+    sys.path.insert(0, _ROOT)
+
+from healthcare_db import get_connection
+```
+
+Then:
+
+```python
+conn = get_connection()             # follow the chain
+conn = get_connection("local")      # force local
+conn = get_connection("supabase")   # force Supabase
+```
+
+**Loaders use `loader_connection()` instead.** It does the same resolution, but
+prints the resolved target before handing back a connection and accepts
+`--target local|supabase` on the command line. A script about to write two
+million rows should say out loud where they are going, and you should be able to
+redirect it without editing code:
+
+```bash
+python ma-dashboard/load_ma_data.py                     # follow the chain
+python ma-dashboard/load_ma_data.py --target local      # force local
+```
+
+To check connectivity without starting an app:
+
+```bash
+python healthcare_db.py             # test whatever the chain resolves to
+python healthcare_db.py supabase    # test Supabase specifically
 ```
 
 ---
@@ -156,34 +189,87 @@ tables in `drinf`, not `public`.**
 
 ---
 
-## 6. Known drift
+## 6. The freshness ledger
 
-Being honest about the current state, because a standard nobody follows isn't a standard.
+`meta.data_sources` is one row per external dataset, and it is the answer to
+"what needs loading?" It replaces knowing this by heart.
 
-- **`get_db_config()` is copy-pasted three times**: `pfs-analysis/utils.py`,
-  `ma-dashboard/data_loader.py`, `payor-lookup/data_loader.py`. Three copies
-  means three things to fix when the pattern changes.
-- **None of the seven loaders use the chain.** `load_gpci.py`, `load_mpfs.py`,
-  `load_utilization.py`, `load_market_definitions.py`, and `load_ma_data.py`
-  read `LOCAL_*` only, so they cannot target Supabase without editing code.
-  `load_price_transparency.py` reads `SUPABASE_*` only, with no local fallback
-  and no defaults, so it fails with a confusing error if the vars are missing.
-- **`load_cbsa_markets.py` hardcodes** the pooler host, port, and the
-  `postgres.numdlqsfydtypeurijae` username. It also hardcodes a Windows path
-  (`C:\dev\healthcare_analytics\...`) for its input file.
-- **Key naming is inconsistent**: some configs use `database`, others `dbname`.
-  Both work (`psycopg2` accepts either), but pick one. `dbname` is the actual
-  libpq keyword.
-- **`create_views.sql` defines `v_cf_clean` twice** (lines 75 and 90). The
-  second definition drops and replaces the first, so the file works, but the
-  dead first version should go.
-- **Three live views have no DDL in the repo**: `drinf.v_plan_master`,
-  `drinf.v_rvu_mix_metrics`, `cms.provider_enrollment_map`. If the database is
-  ever rebuilt from source, they don't come back.
+`cms.data_sources` had the right idea but only covered the six CMS provider
+datasets and only recorded what had already happened. `meta.data_sources` covers
+every schema and adds the two columns that actually drive decisions:
+
+| Column | Why it matters |
+|---|---|
+| `url_stability` | `stable` means a fixed URL you can cron. `predictable` means derivable from a date pattern. `unstable` means the path contains a UUID that changes every publication, so a human or an agent has to go find it. `none` means the file arrives by hand. |
+| `freshness_column` | Which timestamp column marks a load. The loaders drifted across four names for this: `load_date`, `loaded_at`, `created_at`, `created_date`. |
+
+Query it through the view, which sorts worst-first:
+
+```sql
+SELECT source_name, status, days_overdue, url_stability, loader_script
+FROM meta.v_data_freshness;
+```
+
+`status` is one of:
+
+| Status | Meaning |
+|---|---|
+| `overdue` | Past 1.5x its cadence. Load it. |
+| `due` | Past its cadence but inside the grace window. |
+| `never_loaded` | No load timestamp and no rows. |
+| `untracked` | Rows present but the table has no load timestamp, so staleness is unknowable. `drinf.medicare_utilization` is the current example. |
+| `current` | Inside its cadence. |
+| `n/a` | Static or manually maintained, no cadence to miss. |
+
+To recompute counts and timestamps from the tables themselves:
+
+```sql
+SELECT meta.refresh_data_source_stats();       -- exact counts
+SELECT meta.refresh_data_source_stats(false);  -- fast estimates
+```
+
+`cms.data_sources` still exists and is still written by the CMS loaders, which
+live outside this repo. Treat `meta.data_sources` as the read surface.
 
 ---
 
-## 7. Quick reference
+## 7. Known drift
+
+Being honest about the current state, because a standard nobody follows isn't a standard.
+
+- **Three live views have no DDL in the repo**: `drinf.v_plan_master`,
+  `drinf.v_rvu_mix_metrics`, `cms.provider_enrollment_map`. If the database is
+  ever rebuilt from source, they don't come back. This is the one worth fixing
+  next.
+- **The CMS loaders are not in this repo.** Six datasets in the `cms` schema are
+  loaded by something else, so `meta.data_sources.loader_script` is null for
+  them and nothing here can refresh them.
+- **`drinf.medicare_utilization` has no load timestamp column**, so its
+  freshness cannot be computed. Its loader also hardcodes a separate UUID URL
+  per year, so adding a year needs a code edit.
+- **Four names for one concept**: `load_date`, `loaded_at`, `created_at`,
+  `created_date`. Recorded per-table in `meta.data_sources.freshness_column`
+  rather than renamed, since renaming columns would break the loaders.
+
+### Fixed
+
+- ~~`get_db_config()` copy-pasted three times~~. Now only in `healthcare_db.py`.
+- ~~None of the seven loaders use the chain~~. All seven now do.
+- ~~`load_utilization.py` used `os.getenv` with no `import os`~~. It raised
+  `NameError` on import and could never have run. Fixed.
+- ~~`load_cbsa_markets.py` hardcodes pooler host, port, and username~~. Now
+  resolves through the shared module. It still opens two connections, which is
+  correct: it reads from local and upserts to both.
+- ~~Hardcoded `C:\dev\...` paths~~. Now `PFS_DATA_DIR` and `CBSA_FILE` env vars
+  with repo-relative defaults.
+- ~~`database` vs `dbname` inconsistency~~. Standardized on `dbname`.
+- ~~`create_views.sql` defines `v_cf_clean` twice~~. Dead first definition
+  removed, after confirming against `pg_get_viewdef` that the live view is the
+  second one.
+
+---
+
+## 8. Quick reference
 
 ```bash
 # Is it up?
@@ -213,7 +299,7 @@ SELECT count(*), state FROM pg_stat_activity GROUP BY state;
 SELECT round(100.0*sum(blks_hit)/nullif(sum(blks_hit)+sum(blks_read),0), 2)
 FROM pg_stat_database WHERE datname = current_database();
 
--- data freshness for the cms schema
-SELECT source_name, refresh_cadence, last_loaded_at, record_count
-FROM cms.data_sources ORDER BY last_loaded_at;
+-- what needs loading, worst first
+SELECT source_name, status, days_overdue, url_stability, loader_script
+FROM meta.v_data_freshness;
 ```

@@ -73,21 +73,6 @@ COMMENT ON VIEW drinf.v_gpci_clean IS 'Clean GPCI data by year and locality. Gra
 DROP VIEW IF EXISTS drinf.v_cf_clean CASCADE;
 
 CREATE VIEW drinf.v_cf_clean AS
-SELECT DISTINCT
-    mpfs_year AS year,
-    -- Take the modal (most common) CF for the year, handling any row-level variations
-    FIRST_VALUE(conversion_factor) OVER (
-        PARTITION BY mpfs_year
-        ORDER BY conversion_factor DESC NULLS LAST
-    ) AS conversion_factor
-FROM drinf.mpfs_rvu
-WHERE conversion_factor IS NOT NULL
-GROUP BY mpfs_year, conversion_factor;
-
--- Simpler version - just get distinct year/CF pairs
-DROP VIEW IF EXISTS drinf.v_cf_clean CASCADE;
-
-CREATE VIEW drinf.v_cf_clean AS
 SELECT
     year,
     conversion_factor
