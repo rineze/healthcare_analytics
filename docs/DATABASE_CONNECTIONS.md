@@ -233,7 +233,47 @@ live outside this repo. Treat `meta.data_sources` as the read surface.
 
 ---
 
-## 7. Known drift
+## 7. Data integrity audit
+
+Run 2026-09-06. Checked for duplicates, NULLs in key columns, and value sanity.
+
+**Values are clean.** No negative RVUs, no non-positive negotiated rates, no bad
+GPCI factors, no negative enrollment, penetration all within 0-100, and the 2026
+conversion factor is a single consistent value ($33.4009). Two cosmetic oddities
+worth knowing but not fixing: 23 rows in `ma_county_penetration` have NULL
+penetration, and 4 rows show `enrolled > eligibles`, both straight from the CMS
+file.
+
+**No duplicates anywhere**, on any table's natural key.
+
+**The problems were structural.** Four loaders assumed unique constraints that
+did not exist:
+
+| Table | Consequence |
+|---|---|
+| `ma_cpsc_enrollment`, `ma_plan_directory`, `ma_county_penetration` | `load_ma_data.py` could not run at all. Postgres validates an `ON CONFLICT` spec at plan time, so with no matching unique index it raises `42P10` even when zero rows would conflict. The most overdue dataset was also the one that could not be refreshed. |
+| `mpfs_rvu` | `load_mpfs.py` did a bare `INSERT` with no `ON CONFLICT` and no prior `DELETE`, against a table keyed only on a serial. Re-running it for an already-loaded year appended a second full copy and doubled every downstream RVU total. |
+
+Fixed in `sql/migrations/003_missing_unique_constraints.sql` plus an upsert in
+`load_mpfs.py`. Note `uq_mpfs_rvu_key` uses `NULLS NOT DISTINCT`, because
+`modifier` is NULL on 88% of rows and a default unique index treats NULLs as
+distinct, which would have let duplicates through anyway.
+
+Every other loader's `ON CONFLICT` target was already backed by a real
+constraint and needed no change.
+
+### Open
+
+- **`ma_cpsc_enrollment.fips` is 100% NULL** across all 2.37M rows. The loader
+  creates the column and an index on it but never populates it. The dashboard
+  already works around this by sourcing FIPS from `ma_county_penetration`
+  instead, so nothing is visibly broken, but the column and its index are dead
+  weight and a trap for anyone who tries to join on them. Populate it during the
+  next MA reload, or drop both.
+
+---
+
+## 8. Known drift
 
 Being honest about the current state, because a standard nobody follows isn't a standard.
 
@@ -269,7 +309,7 @@ Being honest about the current state, because a standard nobody follows isn't a 
 
 ---
 
-## 8. Quick reference
+## 9. Quick reference
 
 ```bash
 # Is it up?

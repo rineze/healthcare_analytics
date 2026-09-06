@@ -157,8 +157,25 @@ def load_to_postgres(df, conn):
     cols_str = ', '.join(cols)
     template = '(' + ', '.join(['%s'] * len(cols)) + ')'
 
-    # Use execute_values for faster bulk insert
-    insert_sql = f"INSERT INTO drinf.mpfs_rvu ({cols_str}) VALUES %s"
+    # Upsert on the natural key. This used to be a bare INSERT, which meant
+    # re-running the loader for an already-loaded year appended a second full
+    # copy of that year rather than replacing it, silently doubling every
+    # downstream RVU total. The matching unique index is uq_mpfs_rvu_key
+    # (see sql/migrations/003_missing_unique_constraints.sql).
+    conflict_key = ('mpfs_year', 'hcpcs', 'modifier')
+    updatable = [c for c in cols if c not in conflict_key]
+
+    if updatable:
+        update_clause = ', '.join(f"{c} = EXCLUDED.{c}" for c in updatable)
+        conflict_action = f"DO UPDATE SET {update_clause}"
+    else:
+        # Nothing outside the key to update; an empty SET is a syntax error.
+        conflict_action = "DO NOTHING"
+
+    insert_sql = (
+        f"INSERT INTO drinf.mpfs_rvu ({cols_str}) VALUES %s "
+        f"ON CONFLICT (mpfs_year, hcpcs, modifier) {conflict_action}"
+    )
     execute_values(cursor, insert_sql, records, template=template, page_size=1000)
 
     conn.commit()
