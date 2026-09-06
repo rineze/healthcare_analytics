@@ -1,14 +1,11 @@
 ---
 name: portfolio-review
-description: Run the monthly portfolio review. Loads any broker exports sitting in portfolio/inbox/, reconciles them against the file totals, refreshes prices and fundamentals, then dispatches the investment-analyst agent to write and send the report. Use when Dan says "run my portfolio review", "portfolio update", or drops new broker exports in the inbox.
+description: Run the periodic portfolio review. Loads any broker exports or hand-written entries sitting in portfolio/inbox/, reconciles them, refreshes prices, then dispatches the specialist agents on their own cadences. Use when asked to run a portfolio review or portfolio update, or after dropping new exports in the inbox.
 ---
 
 # Portfolio Review
 
-The whole ritual: export, drop in `inbox/`, run this.
-
-Work from the repository root. Every step prints something worth reading, so do
-not run them blind.
+Load, reconcile, enrich, then dispatch. Work from the repository root.
 
 ## 1. Load
 
@@ -16,21 +13,19 @@ not run them blind.
 python portfolio/load.py
 ```
 
-Then **read the reconciliation output before continuing.**
+**Read the reconciliation before continuing.**
 
-- **Errors** mean nothing was written. Do not proceed, do not work around it,
-  and do not pass `--allow-unknown-accounts` to make an error go away. Report
-  what failed and stop. An account missing from `config.yaml` means positions
-  were dropped, so every total downstream would be wrong.
-- **Warnings** mean the load succeeded with known gaps. Note them, continue, and
-  make sure they reach the report.
+- **Errors** mean nothing was written. Stop. Do not work around it, and never
+  pass a flag that suppresses validation to make a red light go green. An account
+  missing from config means positions were dropped, so every total downstream
+  would be wrong.
+- **Warnings** mean the load succeeded with known gaps. Carry them forward so
+  they reach the reports.
 - **Empty inbox** is fine. The last snapshot is still in the database and prices
-  will refresh against it, so the review still works. Say that you are running
-  against the existing snapshot and give its date.
+  refresh against it. Say which snapshot you are running against.
 
-If the reconciliation shows a mismatch between parsed and stated totals, the
-parser is dropping rows. That is a code fix in `portfolio/parsers/`, not
-something to note and move past.
+A mismatch between parsed and stated totals is a parser bug, not a note to move
+past.
 
 ## 2. Enrich
 
@@ -38,39 +33,46 @@ something to note and move past.
 python portfolio/enrich.py
 ```
 
-Pulls prices, sector, industry, and fundamentals from yfinance, and fills market
-value on any lots that were derived from transaction history.
+Prices, sector, fundamentals, and market value for any position that arrived as a
+share count without a value. Symbols it cannot resolve are recorded rather than
+dropped; note them.
 
-Symbols it cannot resolve are recorded rather than dropped. Note them.
+## 3. Dispatch
 
-## 3. Report
+Each agent has its own cadence, because their findings change at different
+speeds. Running an agent that has nothing new to say trains the reader to skim.
 
-Dispatch the `investment-analyst` subagent. Give it:
+| Agent | When | Why |
+|---|---|---|
+| investment-analyst | Every run | Positions and weights change continuously |
+| market-analyst | Monthly | Research does not turn over week to week |
+| tax-agent | Quarterly, plus November and December | Harvesting has a real deadline; the rest of the year it repeats itself |
 
-- The date of the snapshot being reported on
-- Any warnings from steps 1 and 2, so they land in the report's data gaps section
-  rather than being discovered independently
+Pass each agent any warnings from steps 1 and 2 so gaps land in their reports
+rather than being rediscovered.
 
-The agent reads `python portfolio/metrics.py --json`, writes
-`portfolio/reports/YYYY-MM-DD-investment.md`, records the run, and sends the
-digest through `notify.py`.
+**When you skip an agent, say so and say when it next runs.** A silent omission
+is indistinguishable from a report with nothing to say.
+
+Override the cadence when asked, or when something in the load warrants it: a
+large new position justifies research out of cycle, and a realized sale justifies
+the tax agent regardless of month.
+
+The **ledger** is never dispatched here. It runs when there is something to
+record, driven by conversation.
 
 ## 4. Confirm
 
-Report back to Dan:
-
-- Snapshot date and total portfolio value
-- Where the report was written
-- Whether the Telegram send succeeded
-- Any warnings that need him to do something (an account to add to config, a
-  broker export to regenerate, a symbol that will not resolve)
+Report back: snapshot date and total value, which agents ran and which were
+skipped with next run dates, where reports were written, whether notifications
+sent, and anything needing action (an account to add to config, an export to
+regenerate, a symbol that will not resolve).
 
 ## Notes
 
 - Loads are idempotent. Re-running on the same files updates rather than
-  duplicates, so there is no harm in running it twice.
-- `--dry-run` on `load.py` parses and reconciles without writing. Use it when
-  testing a new export format.
-- The market analyst and tax agent are not built yet. If Dan asks for sector
-  research or tax-loss harvesting, say so rather than improvising it here. The
-  scaffolding is in `portfolio/tax_metrics.py`.
+  duplicates.
+- `--dry-run` parses and reconciles without writing. Use it when testing a new
+  export format.
+- For a question rather than a review, use `portfolio-ask` or talk to an agent
+  directly.

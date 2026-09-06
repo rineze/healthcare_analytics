@@ -40,6 +40,7 @@ from pathlib import Path
 
 from parsers.common import (
     ParseResult,
+    classify_action,
     clean_date,
     clean_decimal,
     clean_symbol,
@@ -73,15 +74,38 @@ REQUIRED = {"account_id", "symbol"}
 TOTAL_MARKERS = {"ACCOUNT_TOTAL", "ACCOUNTTOTAL", "TOTAL", "SUBTOTAL"}
 
 
+TXN_CANDIDATES = {
+    "account_id": ["account_id", "account", "account id"],
+    "trade_date": ["trade_date", "date", "trade date", "activity date"],
+    "action": ["action", "type", "transaction_type", "trans code"],
+    "symbol": ["symbol", "ticker"],
+    "quantity": ["quantity", "shares", "qty"],
+    "price": ["price"],
+    "amount": ["amount", "net_amount", "total"],
+    "note": ["note", "notes", "description"],
+}
+
+TXN_MARKERS = {"trade_date", "trade date", "action", "transaction_type"}
+
+
 def detect(path: Path) -> str | None:
-    """Identify by the account_id column, which no broker export has."""
+    """Identify by the account_id column, which no broker export has.
+
+    A hand-written file is either positions (what is held) or transactions (what
+    happened). Both carry account_id; a trade date or an action column is what
+    distinguishes the second.
+    """
     cells = {c.lower().strip() for row in sniff_lines(path, 10) for c in row if c.strip()}
-    if "account_id" in cells or "account id" in cells:
-        return "positions"
-    return None
+    if not ("account_id" in cells or "account id" in cells):
+        return None
+    if cells & TXN_MARKERS:
+        return "transactions"
+    return "positions"
 
 
 def parse(path: Path, cfg: dict, kind: str, as_of: date | None = None) -> ParseResult:
+    if kind == "transactions":
+        return _parse_transactions(path, cfg)
     if kind != "positions":
         raise ValueError(f"manual parser does not handle kind={kind!r}")
 
@@ -244,6 +268,86 @@ def parse(path: Path, cfg: dict, kind: str, as_of: date | None = None) -> ParseR
         result.warn(
             f"{valued_without_qty} position(s) have quantity but no market value. "
             "enrich.py will price them from the latest close."
+        )
+
+    return result
+
+
+def _parse_transactions(path: Path, cfg: dict) -> ParseResult:
+    """Parse a hand-written transactions file.
+
+    This is what the ledger agent writes to. Every row is something that
+    happened: a purchase, a sale, a contribution, a dividend. Unlike a positions
+    file it is append-only, so an entry recorded once is never rewritten.
+    """
+    expected = {c for group in TXN_CANDIDATES.values() for c in group}
+    df, _, notes = read_broker_csv(path, expected)
+
+    result = ParseResult(source_file=path.name, platform=PLATFORM, kind="transactions")
+    for n in notes:
+        result.warn(n)
+    result.rows_read = len(df)
+
+    cols = {k: pick_column(df, v) for k, v in TXN_CANDIDATES.items()}
+    for required in ("account_id", "trade_date"):
+        if cols[required] is None:
+            result.warn(
+                f"Required column '{required}' not found. Columns seen: {list(df.columns)}"
+            )
+            return result
+
+    known_accounts = {a["account_id"] for a in cfg["accounts"]}
+
+    for idx, row in df.iterrows():
+        account_id = get(row, cols["account_id"])
+        if is_null(account_id):
+            result.drop(idx, "no account_id")
+            continue
+        account_id = str(account_id).strip()
+
+        if account_id not in known_accounts:
+            result.unknown_accounts.add(f"{account_id} (manual)")
+            result.drop(idx, f"account_id '{account_id}' is not in config.yaml")
+            continue
+
+        trade_date = clean_date(get(row, cols["trade_date"]))
+        if trade_date is None:
+            result.drop(idx, "no parseable trade date")
+            continue
+
+        note = get(row, cols["note"])
+        action = classify_action(note, get(row, cols["action"]))
+
+        result.transactions.append({
+            "account_id": account_id,
+            "trade_date": trade_date,
+            "settle_date": None,
+            "action": action,
+            "symbol": clean_symbol(get(row, cols["symbol"])),
+            "quantity": clean_decimal(get(row, cols["quantity"])),
+            "price": clean_decimal(get(row, cols["price"])),
+            "amount": clean_decimal(get(row, cols["amount"])),
+            "description": None if is_null(note) else str(note).strip()[:500],
+            "source_file": path.name,
+        })
+
+    unknown = [t for t in result.transactions if t["action"] == "other"]
+    if unknown:
+        result.warn(
+            f"{len(unknown)} row(s) could not be classified into a known action "
+            "and loaded as 'other'. They are excluded from realized gain/loss and "
+            "from wash-sale detection, so an unclassified buy is an invisible buy."
+        )
+
+    buys_without_detail = [
+        t for t in result.transactions
+        if t["action"] == "buy" and (t["symbol"] is None or t["quantity"] is None)
+    ]
+    if buys_without_detail:
+        result.warn(
+            f"{len(buys_without_detail)} purchase(s) are missing a symbol or share "
+            "count. A purchase without both cannot establish a tax lot and will "
+            "not be seen by wash-sale detection."
         )
 
     return result

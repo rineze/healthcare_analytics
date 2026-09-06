@@ -236,6 +236,7 @@ def load(as_of: date | None, dry_run: bool, archive: bool, allow_unknown: bool) 
     cfg = config_mod.load_config()
     db.init_schema()
     config_mod.sync_accounts_to_db(cfg)
+    config_mod.sync_asset_class_overrides(cfg)
 
     print(f"\nScanning {INBOX}")
     results = collect(cfg, as_of, rec)

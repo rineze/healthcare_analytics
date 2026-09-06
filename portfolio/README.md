@@ -4,26 +4,38 @@ Consolidated reporting across Fidelity, Empower, and Robinhood. No single
 platform sees the whole picture, so concentration, sector exposure, and
 cross-account wash sales are invisible until the data lives in one place.
 
-Three agents were planned. **One is built.**
+Four agents, all built.
 
-| Agent | Status | What it does |
+| Agent | Reads | Anchored to |
 |---|---|---|
-| Investment analyst | Built | Bottom-up. Positions, weights, concentration, contributors, valuation, what changed |
-| Market analyst | Not built | Top-down. Sector vs benchmark, macro, research on what he owns |
-| Tax agent | Not built | TLH candidates, cross-account wash sales, holding periods, asset location |
+| `investment-analyst` | `metrics.py` | CFA Institute portfolio planning, the IPS framework and RRTTLLU constraints, Markowitz |
+| `market-analyst` | `market_context.py` | Rappaport & Mauboussin, *Expectations Investing* |
+| `tax-agent` | `tax_metrics.py` | IRC §1091, §1091(d), Rev. Rul. 2008-5, §1211, §1212 |
+| `ledger` | writes only | Segregation of duties |
 
-Agent 3 waits on purpose. Whether it can say anything trustworthy depends on how
-clean the lot data turns out to be, and that is unknowable until real exports are
-loaded. See `tax_metrics.py` for the algorithms, written out and ready to fill in.
+Talk to one by name, use `/portfolio-ask` to put a question to all of them at
+once, or `/portfolio-review` for the periodic run.
 
-## The design principle
+## Two design principles
 
-**Python computes, agents interpret.**
+**Python computes, agents interpret.** No LLM calculates a cost basis, a holding
+period, a weight, or a wash-sale window. The metrics modules produce every number
+and agents narrate what it means. Every figure in every report traces back to a
+function and a SQL query you can run by hand.
 
-No LLM calculates a cost basis, a holding period, a weight, or a wash-sale
-window. `metrics.py` produces every number and agents narrate what it means.
-Every figure in every report traces back to a function and a SQL query you can
-run by hand.
+**Agent files carry expertise, not findings.** The test applied to every line: *if
+a position were sold tomorrow, would this sentence become wrong?* If yes it
+belongs in the database. No agent file contains a ticker, a dollar figure, an
+account name, or a brokerage name. They contain how to reason about position
+sizing, what makes a loss harvestable, why basis is sunk. The facts arrive at
+runtime through the payload.
+
+That is why the brains cite doctrine. An agent reasoning from the CFA framework
+or from a code section can be checked against the source; one reasoning from
+invented principles cannot.
+
+**Only the ledger writes.** The three reporting agents are read-only, so none of
+them can modify the data it is drawing conclusions from.
 
 ---
 
@@ -159,6 +171,21 @@ fid-brokerage,,,,85612,,,2026-09-04,ACCOUNT TOTAL
 **You do not need cost basis in a Roth IRA or a 401k.** Gains there are never
 taxed, so basis is permanently irrelevant. Only taxable accounts need it.
 
+### Recording something that just happened
+
+For a purchase, a sale, or a contribution, talk to the `ledger` agent in plain
+language. It asks for whatever is missing, shows you the exact rows, waits for
+confirmation, and writes through the same reconciliation gate a broker export
+passes. Transactions land in `inbox/manual_transactions.csv`:
+
+```
+account_id,trade_date,action,symbol,quantity,price,amount,note
+```
+
+Loading transactions is what turns wash-sale detection from partial to complete.
+Without them, detection runs off open lots and cannot see a position that was
+already closed.
+
 ### Then
 
 ```
@@ -190,6 +217,11 @@ python portfolio/metrics.py --json            # the payload agents read
 python portfolio/metrics.py --record path.md  # save this run's snapshot
 
 python portfolio/notify.py --test
+
+python portfolio/tax_metrics.py --tlh                        # harvesting candidates
+python portfolio/tax_metrics.py --wash-sale SYM --date D     # IRC 1091 evidence
+python portfolio/tax_metrics.py --location                   # asset location
+python portfolio/market_context.py                           # fund vs company split
 ```
 
 Loads are idempotent. `lot_id` and `txn_id` are deterministic hashes of their

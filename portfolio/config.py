@@ -166,6 +166,22 @@ def account_ids(cfg: dict) -> set[str]:
     return {a["account_id"] for a in cfg["accounts"]}
 
 
+def sync_asset_class_overrides(cfg: dict) -> int:
+    """Write user-declared asset classes into securities.
+
+    These are Dan's own statements about what a holding is, so they must not
+    depend on a market data provider being reachable. enrich.py refines whatever
+    is left unclassified; it does not own these.
+    """
+    from db import upsert
+
+    rows = [
+        {"symbol": str(sym).upper(), "asset_class": cls, "enrich_status": "declared"}
+        for sym, cls in (cfg.get("asset_class_overrides") or {}).items()
+    ]
+    return upsert("securities", rows, ["symbol"])
+
+
 def sync_accounts_to_db(cfg: dict) -> int:
     """Push config.yaml accounts into portfolio.accounts.
 

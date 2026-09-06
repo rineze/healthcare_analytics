@@ -50,7 +50,11 @@ CASH_HINTS = ("money market", "cash reserves", "treasury only", "government cash
 
 
 def classify_asset_class(info: dict, symbol: str, overrides: dict) -> str:
-    """Best-effort asset class for allocation drift reporting."""
+    """Best-effort asset class for allocation drift reporting.
+
+    A user declaration always wins over inference. The heuristic below is a
+    guess; config.asset_class_overrides is a statement of fact.
+    """
     if symbol in overrides:
         return overrides[symbol]
 
