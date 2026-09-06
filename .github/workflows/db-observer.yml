@@ -1,0 +1,66 @@
+name: DB Observer
+
+# The scheduled freshness check. Runs whether or not anyone has a Claude
+# session open, and messages Telegram when a dataset goes stale.
+#
+# Setup (one time, see docs/OBSERVER_SETUP.md):
+#   1. sql/migrations/004_observer_role.sql, then set the role's password
+#   2. Create a Telegram bot with @BotFather, get the token and your chat id
+#   3. Add four repository secrets under Settings > Secrets and variables >
+#      Actions:
+#         SUPABASE_HOST, SUPABASE_USER, SUPABASE_PASSWORD
+#         TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
+
+on:
+  schedule:
+    # Mondays at 13:00 UTC, which is 8am Central in summer and 7am in winter.
+    # GitHub cron is UTC only and does not follow DST.
+    - cron: "0 13 * * 1"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Print the message instead of sending it"
+        type: boolean
+        default: false
+      always:
+        description: "Send even when nothing needs attention"
+        type: boolean
+        default: false
+
+concurrency:
+  group: db-observer
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install --quiet psycopg2-binary python-dotenv
+
+      - name: Check data freshness
+        env:
+          # Read-only db_observer role. It has SELECT on the meta schema and
+          # nothing else, so this credential cannot modify any data.
+          SUPABASE_HOST: ${{ secrets.SUPABASE_HOST }}
+          SUPABASE_USER: ${{ secrets.SUPABASE_USER }}
+          SUPABASE_PASSWORD: ${{ secrets.SUPABASE_PASSWORD }}
+          SUPABASE_PORT: "5432"
+          SUPABASE_DATABASE: postgres
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        # A connection failure or a Telegram failure exits non-zero on purpose.
+        # A silently broken observer is worse than no observer, so let GitHub
+        # mark the run red and email about it.
+        run: |
+          python scripts/db_observer.py \
+            ${{ inputs.dry_run && '--dry-run' || '' }} \
+            ${{ inputs.always && '--always' || '' }}
