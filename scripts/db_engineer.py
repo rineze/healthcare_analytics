@@ -29,10 +29,24 @@ Commands it understands
     /stale      what needs loading
     /health     database vitals
     /sources    the full ledger
+    /run        what it is allowed to run for you
     /help       this list
 
 Anything else you type is handed to Claude Code with the repo as context, so
 you can ask "why is medicare_utilization untracked" and get a real answer.
+
+Writes
+------
+It can write, but only what db_actions.ACTIONS allows and only after you tap
+approve. Those are two separate limits: the allowlist decides what is possible
+and lives in code, the approval decides what proceeds right now. There is no
+path from a Telegram message to arbitrary SQL or an arbitrary shell command,
+so the worst a hostile message can do is ask for something already on the list,
+which still needs your tap.
+
+Approvals are single use, expire after 15 minutes, and are bound to your chat.
+Proactive alerts carry a "Fix:" button that issues a fresh approval prompt
+rather than a live one, since an alert may sit unread for hours.
 """
 
 import argparse
@@ -41,6 +55,7 @@ import os
 import shutil
 import subprocess
 import sys
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -56,6 +71,10 @@ for _p in (str(_ROOT), str(_HERE)):
 
 from healthcare_db import get_connection  # noqa: E402
 from db_observer import build_message, collect  # noqa: E402
+from db_actions import (  # noqa: E402
+    ACTIONS, APPROVAL_TTL_SECONDS, ApprovalGate, actions_for_source,
+    audit, run_action,
+)
 
 TELEGRAM_MAX_CHARS = 4096
 POLL_TIMEOUT = 30          # seconds Telegram holds the long poll open
@@ -86,23 +105,35 @@ class Telegram:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             return json.loads(resp.read())
 
-    def send(self, text):
+    def send(self, text, buttons=None):
+        """Send a message, optionally with an inline keyboard.
+
+        buttons is a list of (label, callback_data) laid out in one row.
+        """
         if len(text) > TELEGRAM_MAX_CHARS:
             text = text[: TELEGRAM_MAX_CHARS - 20].rstrip() + "\n<i>(truncated)</i>"
 
         if self.dry_run:
             print("-" * 60)
             print(text)
+            if buttons:
+                print("[buttons] " + "  ".join(f"[{l}]" for l, _ in buttons))
             print("-" * 60)
             return True
 
+        payload = {
+            "chat_id": self.chat_id,
+            "text": text,
+            "parse_mode": "HTML",
+            "disable_web_page_preview": True,
+        }
+        if buttons:
+            payload["reply_markup"] = {"inline_keyboard": [
+                [{"text": label, "callback_data": data} for label, data in buttons]
+            ]}
+
         try:
-            return self._call("sendMessage", {
-                "chat_id": self.chat_id,
-                "text": text,
-                "parse_mode": "HTML",
-                "disable_web_page_preview": True,
-            }).get("ok", False)
+            return self._call("sendMessage", payload).get("ok", False)
         except urllib.error.HTTPError as e:
             # Telegram explains itself in the body, not the status line. The
             # usual cause is malformed HTML in the message.
@@ -112,8 +143,25 @@ class Telegram:
             print(f"send failed: {e}", file=sys.stderr)
             return False
 
+    def answer_callback(self, callback_id, text=""):
+        """Clear the spinner on a tapped button."""
+        if self.dry_run:
+            return True
+        try:
+            return self._call("answerCallbackQuery", {
+                "callback_query_id": callback_id, "text": text[:200],
+            }).get("ok", False)
+        except Exception as e:
+            print(f"answerCallback failed: {e}", file=sys.stderr)
+            return False
+
     def poll(self):
-        """Long-poll for new messages. Returns a list of (chat_id, text)."""
+        """Long-poll for updates.
+
+        Returns a list of dicts, each either
+            {"kind": "message",  "chat": str, "text": str}
+            {"kind": "callback", "chat": str, "data": str, "id": str}
+        """
         try:
             params = {"timeout": POLL_TIMEOUT}
             if self.offset is not None:
@@ -124,15 +172,23 @@ class Telegram:
             time.sleep(5)
             return []
 
-        messages = []
+        events = []
         for update in result.get("result", []):
             self.offset = update["update_id"] + 1
+
+            cb = update.get("callback_query")
+            if cb:
+                chat = str(((cb.get("message") or {}).get("chat") or {}).get("id", ""))
+                events.append({"kind": "callback", "chat": chat,
+                               "data": cb.get("data", ""), "id": cb.get("id", "")})
+                continue
+
             msg = update.get("message") or {}
             text = msg.get("text")
             chat = str((msg.get("chat") or {}).get("id", ""))
             if text:
-                messages.append((chat, text.strip()))
-        return messages
+                events.append({"kind": "message", "chat": chat, "text": text.strip()})
+        return events
 
 
 # ---------------------------------------------------------------------------
@@ -190,20 +246,36 @@ def cmd_sources():
     return "\n".join(lines)
 
 
+def cmd_run():
+    """List what can be run. Each is a button; nothing happens without a tap."""
+    lines = ["<b>What I can run</b>", ""]
+    for a in ACTIONS.values():
+        lines.append(f"• <b>{_esc(a.label)}</b>")
+        lines.append(f"  {_esc(a.detail)}")
+        lines.append(f"  writes {_esc(a.writes)}")
+    lines.append("")
+    lines.append("<i>Tap /propose_&lt;name&gt; to get an approval button, "
+                 "e.g. /propose_load_ma</i>")
+    return "\n".join(lines)
+
+
 HELP = (
     "<b>DB engineer</b>\n\n"
     "/stale - what needs loading\n"
     "/health - database vitals\n"
     "/sources - the full ledger\n"
+    "/run - what I can run for you\n"
     "/help - this\n\n"
-    "Or just ask me something in plain English and I'll dig into the repo "
-    "and the database to answer."
+    "Ask me anything in plain English and I'll dig into the repo and the "
+    "database to answer.\n\n"
+    "I never write to the database without you tapping approve first."
 )
 
 COMMANDS = {
     "/stale": cmd_stale,
     "/health": cmd_health,
     "/sources": cmd_sources,
+    "/run": cmd_run,
     "/help": lambda: HELP,
     "/start": lambda: HELP,
 }
@@ -248,18 +320,93 @@ def ask_claude(question):
     return _esc(answer) if answer else "Claude came back with nothing."
 
 
-def handle(text):
-    """Route one incoming message to an answer."""
+def handle(text, gate=None, chat_id=None):
+    """Route one incoming message.
+
+    Returns (reply_text, buttons). buttons is None for a plain reply.
+    """
     cmd = text.split()[0].lower() if text.split() else ""
     # Telegram appends @botname when a command is used in a group.
     cmd = cmd.split("@")[0]
 
     if cmd in COMMANDS:
         try:
-            return COMMANDS[cmd]()
+            return COMMANDS[cmd](), None
         except Exception as e:
-            return f"That check failed: {_esc(e)}"
-    return ask_claude(text)
+            return f"That check failed: {_esc(e)}", None
+
+    # /propose_<action> asks for approval. It never runs anything by itself.
+    if cmd.startswith("/propose_"):
+        key = cmd[len("/propose_"):]
+        if key not in ACTIONS:
+            known = ", ".join(sorted(ACTIONS))
+            return f"I don't have an action called {_esc(key)}. I have: {_esc(known)}", None
+        if gate is None:
+            return "No approval gate available.", None
+        return propose(gate, key, chat_id)
+
+    return ask_claude(text), None
+
+
+def propose(gate, action_key, chat_id):
+    """Build an approval prompt for an allowlisted action."""
+    action = ACTIONS[action_key]
+    token = gate.propose(action_key, chat_id)
+    audit("proposed", action=action_key, chat=str(chat_id), token=token)
+
+    text = (
+        f"<b>Approve: {_esc(action.label)}</b>\n\n"
+        f"{_esc(action.detail)}\n\n"
+        f"<b>Writes to:</b> {_esc(action.writes)}\n"
+        f"<i>Expires in {APPROVAL_TTL_SECONDS // 60} minutes.</i>"
+    )
+    buttons = [("\u2705 Run it", f"ok:{token}"), ("\u2716 Cancel", f"no:{token}")]
+    return text, buttons
+
+
+def handle_callback(gate, data, chat_id, tg):
+    """A tapped button. Returns the text to answer the callback with."""
+    if ":" not in data:
+        return "unrecognized"
+    verb, token = data.split(":", 1)
+
+    # A proactive alert may sit unread for hours, so its button issues a new
+    # approval prompt rather than carrying a live one. Two taps, never one.
+    if verb == "propose":
+        if token not in ACTIONS:
+            return "unknown action"
+        text, buttons = propose(gate, token, chat_id)
+        tg.send(text, buttons)
+        return "confirm below"
+
+    if verb == "no":
+        gate.cancel(token, chat_id)
+        audit("cancelled", chat=str(chat_id), token=token)
+        tg.send("Cancelled, nothing ran.")
+        return "cancelled"
+
+    if verb != "ok":
+        return "unrecognized"
+
+    action, reason = gate.redeem(token, chat_id)
+    if action is None:
+        audit("approval_rejected", chat=str(chat_id), token=token, reason=reason)
+        tg.send(f"Not run: {_esc(reason)}.")
+        return reason
+
+    audit("approved", action=action.key, chat=str(chat_id), token=token)
+    tg.send(f"\u25b6 Running <b>{_esc(action.label)}</b>...")
+
+    # Loaders take minutes. Run off the main loop so the bot keeps answering.
+    def worker():
+        ok, output = run_action(action)
+        icon = "\u2705" if ok else "\u274c"
+        verdict = "done" if ok else "failed"
+        tg.send(f"{icon} <b>{_esc(action.label)} {verdict}</b>\n\n"
+                f"<pre>{_esc(output)}</pre>")
+
+    threading.Thread(target=worker, daemon=True).start()
+    return "running"
 
 
 # ---------------------------------------------------------------------------
@@ -304,7 +451,21 @@ def proactive_check(tg, state, force=False):
     if new and not force:
         names = ", ".join(_esc(n) for n in new)
         msg = f"<b>New since last check:</b> {names}\n\n" + msg
-    tg.send(msg)
+
+    # Offer a one-tap route to the loader that fixes the worst thing, when one
+    # of the allowlisted actions actually covers it.
+    buttons = None
+    worst = sorted(
+        (r for r in rows if r["status"] in ("overdue", "due")),
+        key=lambda r: -(r["days_overdue"] or 0),
+    )
+    for r in worst:
+        action = actions_for_source(r["source_name"])
+        if action:
+            buttons = [(f"Fix: {action.label}", f"propose:{action.key}")]
+            break
+
+    tg.send(msg, buttons)
     return True
 
 
@@ -329,6 +490,7 @@ def main():
 
     tg = Telegram(token, chat_id, dry_run=args.dry_run)
     state = load_state()
+    gate = ApprovalGate()
 
     if args.once:
         sent = proactive_check(tg, state, force=True)
@@ -336,7 +498,8 @@ def main():
         return 0
 
     print(f"db engineer up. polling telegram, checking every {args.interval}h.")
-    tg.send("🔧 <b>DB engineer online</b>\nSend /help for what I can do.")
+    tg.send("\U0001f527 <b>DB engineer online</b>\nSend /help for what I can do.\n"
+            "<i>I never write without your approval.</i>")
 
     next_check = 0.0
     while True:
@@ -347,14 +510,27 @@ def main():
                 print(f"proactive check failed: {e}", file=sys.stderr)
             next_check = time.time() + args.interval * 3600
 
-        for sender, text in tg.poll():
-            # The bot token is guessable-adjacent and anyone can message a bot.
-            # Only the configured chat gets answers.
-            if sender != tg.chat_id:
-                print(f"ignoring message from {sender}", file=sys.stderr)
+        for event in tg.poll():
+            # Anyone can message a Telegram bot once they find it. Only the
+            # configured chat gets answers, and only it can approve anything.
+            if event["chat"] != tg.chat_id:
+                audit("rejected_sender", chat=event["chat"], kind=event["kind"])
+                print(f"ignoring {event['kind']} from {event['chat']}", file=sys.stderr)
                 continue
-            print(f"< {text}")
-            tg.send(handle(text))
+
+            if event["kind"] == "callback":
+                print(f"< [tap] {event['data']}")
+                try:
+                    note = handle_callback(gate, event["data"], event["chat"], tg)
+                except Exception as e:
+                    note = "failed"
+                    tg.send(f"That failed: {_esc(e)}")
+                tg.answer_callback(event["id"], note)
+                continue
+
+            print(f"< {event['text']}")
+            reply, buttons = handle(event["text"], gate, event["chat"])
+            tg.send(reply, buttons)
 
 
 if __name__ == "__main__":

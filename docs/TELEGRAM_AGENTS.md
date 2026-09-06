@@ -137,6 +137,8 @@ public URL, and it works behind a home router.
 | `/stale` | what needs loading |
 | `/health` | database vitals |
 | `/sources` | the full ledger |
+| `/run` | what it is allowed to run |
+| `/propose_<name>` | ask for an approval button, e.g. `/propose_load_ma` |
 | `/help` | the list |
 
 Anything else goes to Claude Code headless with the repo as working directory,
@@ -153,10 +155,28 @@ repeating the same five items is one you stop reading, which defeats the point.
 **It only answers you.** Anyone can message a Telegram bot if they find it, so
 every sender other than `TELEGRAM_CHAT_ID` is ignored.
 
-**It is read-only.** It connects as `db_observer`, which holds SELECT on `meta`
-and nothing else. Ask it to run a loader and it will describe what it would run
-and tell you it needs approval. Giving it write access is a deliberate later
-step, not a default.
+**It writes only with your approval.** Two separate limits:
+
+- **The allowlist** decides what is *possible*. It lives in
+  `scripts/db_actions.py` as fixed `argv` tuples, run without a shell. Adding
+  an entry is a code change. There is no path from a Telegram message to
+  arbitrary SQL or an arbitrary command, so `/propose_load_ma; rm -rf /` is
+  just an unknown action name.
+- **Your tap** decides what *proceeds*. Approvals are single use, expire after
+  15 minutes, and are bound to your chat id.
+
+Current allowlist: refresh ledger stats, load MA enrollment, load MPFS RVU,
+load MPFS GPCI, load Medicare utilization.
+
+The flow: `/propose_load_ma` gets you a prompt naming exactly what it writes to,
+with Run it / Cancel buttons. Nothing happens until you tap. A proactive alert
+carries a "Fix:" button that opens that same prompt rather than running
+anything, because an alert you read six hours later should not carry a live
+approval.
+
+Long loads run on a background thread, so the bot keeps answering while MA
+enrollment is churning through 2.4M rows. Every proposal, approval, rejection
+and run is appended to `~/.db_engineer_audit.jsonl`.
 
 ## Keeping it alive
 
