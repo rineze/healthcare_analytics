@@ -738,15 +738,28 @@ def staleness(h: pd.DataFrame, as_of: date, tolerance_days: int) -> dict:
             "days_old": age,
         })
 
+    # A stale position carrying no price contributes $0 to the stale total while
+    # being entirely stale. Reporting only the dollar figure would show "$0 stale"
+    # beside a named account, which reads as "nothing stale here" and is the same
+    # unknown-is-not-zero trap this module warns about elsewhere.
+    unpriced = [r for r in rows if not r["market_value"]]
+
     return {
         "available": True,
         "tolerance_days": tolerance_days,
         "stale_position_count": len(rows),
         "stale_market_value": round(stale_mv, 2),
         "stale_pct_of_portfolio": round(stale_mv / total_mv, 4) if total_mv else 0.0,
+        "stale_and_unpriced_count": len(unpriced),
+        "stale_and_unpriced_symbols": sorted(r["symbol"] for r in unpriced),
         "oldest_value_as_of": oldest,
         "stale_accounts": sorted({r["account_id"] for r in rows}),
         "positions": sorted(rows, key=lambda r: -r["market_value"]),
+        "unpriced_caveat": (
+            f"{len(unpriced)} stale position(s) carry no price, so they add $0 to "
+            "the figure above while being fully stale. The dollar total understates "
+            "the exposure; it is not a measure of how much is affected."
+        ) if unpriced else None,
     }
 
 
@@ -905,9 +918,19 @@ def print_summary(p: dict) -> None:
 
     st = p["data_quality"].get("staleness") or {}
     if st.get("available") and st["stale_position_count"]:
-        print(f"\n  Stale values    ${st['stale_market_value']:,.0f} "
-              f"({st['stale_pct_of_portfolio']:.0%}) back to {st['oldest_value_as_of']} "
-              f"in {', '.join(st['stale_accounts'])}")
+        n_unpriced = st.get("stale_and_unpriced_count", 0)
+        if st["stale_market_value"]:
+            print(f"\n  Stale values    ${st['stale_market_value']:,.0f} "
+                  f"({st['stale_pct_of_portfolio']:.0%}) back to {st['oldest_value_as_of']} "
+                  f"in {', '.join(st['stale_accounts'])}")
+        else:
+            print(f"\n  Stale values    {st['stale_position_count']} position(s) stale back to "
+                  f"{st['oldest_value_as_of']} in {', '.join(st['stale_accounts'])}, "
+                  f"value unknown")
+        if n_unpriced:
+            print(f"                  {n_unpriced} of them carry no price "
+                  f"({', '.join(st['stale_and_unpriced_symbols'])}), so the dollar "
+                  "figure understates it")
 
     vc = p["data_quality"].get("valuation") or {}
     if vc.get("available"):
