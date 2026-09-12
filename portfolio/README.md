@@ -11,10 +11,13 @@ Four agents, all built.
 | `investment-analyst` | `metrics.py` | CFA Institute portfolio planning, the IPS framework and RRTTLLU constraints, Markowitz |
 | `market-analyst` | `market_context.py` | Rappaport & Mauboussin, *Expectations Investing* |
 | `tax-agent` | `tax_metrics.py` | IRC §1091, §1091(d), Rev. Rul. 2008-5, §1211, §1212 |
-| `ledger` | writes only | Segregation of duties |
+| `inventory` | `gaps.py`, writes only | Segregation of duties |
 
 Talk to one by name, use `/portfolio-ask` to put a question to all of them at
 once, or `/portfolio-review` for the periodic run.
+
+**New here? Read `HANDOFF.md`.** It is the setup path end to end, including the
+scheduled check-in.
 
 ## Two design principles
 
@@ -40,8 +43,14 @@ That is why the brains cite doctrine. An agent reasoning from the CFA framework
 or from a code section can be checked against the source; one reasoning from
 invented principles cannot.
 
-**Only the ledger writes.** The three reporting agents are read-only, so none of
-them can modify the data it is drawing conclusions from.
+**Only the inventory agent writes.** The three reporting agents are read-only, so
+none of them can modify the data it is drawing conclusions from.
+
+**Silence is a valid output.** `gaps.py` runs daily and says nothing most days.
+It speaks when an account with a known rhythm has actually changed, or when a
+cost basis worth asking about is missing. A prompt that fires regardless of
+whether anything happened is one you learn to dismiss, and then the one that
+mattered gets dismissed too.
 
 ---
 

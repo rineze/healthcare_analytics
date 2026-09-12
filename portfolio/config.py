@@ -22,6 +22,22 @@ VALID_TAX_TYPES = {"taxable", "traditional_ira", "roth_ira",
                    "401k", "roth_401k", "hsa", "529"}
 VALID_ASSET_CLASSES = {"us_equity", "intl_equity", "bond", "cash", "alt", "unknown"}
 
+# How often an account's holdings ACTUALLY change. Not how often to look at it.
+# The distinction matters: an account that only moves when you trade should never
+# be nudged on a calendar, while one receiving payroll contributions is reliably
+# out of date a known number of days after it was last confirmed.
+CADENCE_DAYS = {
+    "weekly": 7,
+    "biweekly": 14,      # the usual payroll contribution rhythm
+    "semimonthly": 15,
+    "monthly": 30,
+    "quarterly": 91,
+    "annually": 365,
+    "on_activity": None,  # changes only when you trade; never nudge on time alone
+    "never": None,        # static holding
+}
+VALID_CADENCES = set(CADENCE_DAYS)
+
 DEFAULT_THRESHOLDS = {
     "concentration_warn_pct": 0.10,
     "tlh_min_loss_usd": 500,
@@ -77,6 +93,13 @@ def load_config(path: Path | None = None) -> dict:
             raise ConfigError(
                 f"{where} tax_type '{acct['tax_type']}' is not one of "
                 f"{sorted(VALID_TAX_TYPES)}."
+            )
+
+        cadence = acct.get("update_cadence")
+        if cadence is not None and cadence not in VALID_CADENCES:
+            raise ConfigError(
+                f"{where} update_cadence '{cadence}' is not one of "
+                f"{sorted(VALID_CADENCES)}."
             )
 
         mask = acct.get("mask4")
@@ -139,6 +162,15 @@ def load_config(path: Path | None = None) -> dict:
     cfg["symbol_overrides"] = overrides
     cfg["thresholds"] = {**DEFAULT_THRESHOLDS, **(cfg.get("thresholds") or {})}
     return cfg
+
+
+def cadence_days(account: dict) -> int | None:
+    """Days after which this account's holdings are expected to have changed.
+
+    None means time alone says nothing: the account changes when something
+    happens to it, not on a schedule, so a calendar-driven nudge would be noise.
+    """
+    return CADENCE_DAYS.get(account.get("update_cadence") or "on_activity")
 
 
 def exposure_for(symbol: str, cfg: dict) -> str:

@@ -13,6 +13,14 @@ accounts:
     label: "Fidelity Individual"
     # taxable | traditional_ira | roth_ira | 401k | roth_401k | hsa | 529
     tax_type: taxable
+    # How often this account's holdings ACTUALLY change. Not how often to look.
+    # weekly | biweekly | semimonthly | monthly | quarterly | annually
+    #   | on_activity (changes only when you trade, never nudged on a calendar)
+    #   | never
+    # A payroll-fed account is reliably out of date a known number of pay
+    # periods after it was last confirmed, and that is what gets reported:
+    # "two contributions have landed", not "29 days old".
+    update_cadence: on_activity
     mask4: "1234"               # LAST FOUR DIGITS ONLY. Never the full number.
 
   - account_id: fid-roth
