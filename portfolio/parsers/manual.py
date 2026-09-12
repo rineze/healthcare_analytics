@@ -69,6 +69,7 @@ CANDIDATES = {
     "cost_basis": ["cost_basis", "cost basis", "basis", "total cost"],
     "acquired_date": ["acquired_date", "acquired", "date acquired", "purchase date"],
     "value_as_of": ["value_as_of", "value as of", "valued", "as of"],
+    "acquisition_type": ["acquisition_type", "acquired_via", "acquisition", "how_acquired"],
     "note": ["note", "notes", "comment"],
 }
 
@@ -235,6 +236,10 @@ def parse(path: Path, cfg: dict, kind: str, as_of: date | None = None) -> ParseR
                 "market_value": market_value,
                 "unrealized_gl": unrealized,
                 "term": holding_term(acquired, result.as_of_date),
+                "acquisition_type": (
+                    str(get(row, cols["acquisition_type"])).strip().lower()
+                    if not is_null(get(row, cols["acquisition_type"])) else None
+                ),
                 "source_file": path.name,
                 "value_as_of": value_as_of,
             })

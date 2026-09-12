@@ -234,6 +234,11 @@ CREATE TABLE IF NOT EXISTS {SCHEMA}.lots (
     market_value    numeric(20, 2),
     unrealized_gl   numeric(20, 2),
     term            text,   -- short | long | unknown, derived from acquired_date not parsed
+    -- How the shares were acquired. This is a fact about the lot, and it decides
+    -- whether the reported basis can be trusted at all: equity compensation
+    -- routinely arrives with broker basis that omits the compensation element
+    -- already taxed as ordinary income, which overstates the gain.
+    acquisition_type text,  -- purchase | espp | rsu | dividend_reinvest | transfer | derived | unknown
     source_file     text,
     value_as_of     date,
     loaded_at       timestamptz NOT NULL DEFAULT now()
@@ -306,6 +311,8 @@ UPDATE {SCHEMA}.holdings SET value_as_of = as_of_date WHERE value_as_of IS NULL;
 
 ALTER TABLE {SCHEMA}.lots ADD COLUMN IF NOT EXISTS value_as_of date;
 UPDATE {SCHEMA}.lots SET value_as_of = as_of_date WHERE value_as_of IS NULL;
+
+ALTER TABLE {SCHEMA}.lots ADD COLUMN IF NOT EXISTS acquisition_type text;
 
 -- CHECK constraints cannot be altered in place, so drop and recreate.
 ALTER TABLE {SCHEMA}.accounts DROP CONSTRAINT IF EXISTS accounts_platform_chk;

@@ -59,6 +59,22 @@ TAXABLE = {"taxable"}
 REV_RUL_2008_5_DIRECT = {"traditional_ira", "roth_ira"}
 TAX_ADVANTAGED = {"traditional_ira", "roth_ira", "401k", "roth_401k", "hsa", "529"}
 
+# Acquisition types whose broker-reported basis cannot be taken at face value.
+EQUITY_COMP = {"espp", "rsu", "iso", "nqso"}
+
+
+def _text_or_none(value) -> str | None:
+    """Lowercased string, or None. pandas nulls must not reach output as 'nan'."""
+    if value is None:
+        return None
+    try:
+        if pd.isna(value):
+            return None
+    except (TypeError, ValueError):
+        pass
+    text = str(value).strip().lower()
+    return text or None
+
 WASH_SALE_WINDOW_DAYS = 30
 SECTION_1211_ORDINARY_CAP = 3000       # $1,500 married filing separately
 
@@ -72,7 +88,7 @@ def _lots(as_of: date) -> pd.DataFrame:
         f"""
         SELECT l.lot_id, l.account_id, a.tax_type, l.symbol, l.acquired_date,
                l.quantity, l.cost_basis, l.cost_per_share, l.market_value,
-               l.unrealized_gl, l.term, l.source_file
+               l.unrealized_gl, l.term, l.source_file, l.acquisition_type
         FROM {SCHEMA}.lots l
         JOIN {SCHEMA}.accounts a ON a.account_id = l.account_id
         WHERE l.as_of_date = %s
@@ -352,12 +368,21 @@ def tlh_candidates(as_of: date, min_loss: float, cfg: dict) -> dict:
                 "market_value": _f(r["market_value"]),
                 "unrealized_gl": _f(r["unrealized_gl"]),
                 "term": r["term"],
+                "acquisition_type": _text_or_none(r.get("acquisition_type")),
             }
             for _, r in grp.iterrows()
         ]
 
         short = sum(l["unrealized_gl"] for l in by_lot if l["term"] == "short")
         long_ = sum(l["unrealized_gl"] for l in by_lot if l["term"] == "long")
+
+        # Equity compensation arrives with basis the broker frequently reports
+        # wrong. For ESPP the discount is taxed as ordinary income at purchase or
+        # sale, and that compensation element belongs in basis; brokers commonly
+        # report only the discounted price paid. Understated basis overstates the
+        # gain, which here means it UNDERSTATES the loss. The harvestable figure
+        # is a floor, and the correct number comes off Form 3922.
+        comp_lots = [l for l in by_lot if l.get("acquisition_type") in EQUITY_COMP]
 
         candidates.append({
             "symbol": symbol,
@@ -368,6 +393,18 @@ def tlh_candidates(as_of: date, min_loss: float, cfg: dict) -> dict:
             "accounts": sorted({l["account_id"] for l in by_lot}),
             "spans_multiple_accounts": len({l["account_id"] for l in by_lot}) > 1,
             "lots": sorted(by_lot, key=lambda l: l["unrealized_gl"]),
+            "equity_comp_lot_count": len(comp_lots),
+            "basis_reliability": "suspect" if comp_lots else "as_reported",
+            "basis_caveat": (
+                f"{len(comp_lots)} of these lots came from equity compensation "
+                f"({', '.join(sorted({l['acquisition_type'] for l in comp_lots}))}). "
+                "Broker-reported basis on such shares frequently omits the "
+                "compensation element already taxed as ordinary income. Basis is "
+                "therefore likely UNDERSTATED, which means the loss shown here is "
+                "likely UNDERSTATED too. Form 3922 (ESPP) or the vest statement "
+                "(RSU) carries the figures needed to correct it. Do not treat the "
+                "number above as final."
+            ) if comp_lots else None,
             "wash_sale": wash_sale_check(symbol, as_of, cfg),
         })
 
